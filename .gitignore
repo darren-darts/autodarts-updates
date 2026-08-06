@@ -1,0 +1,44 @@
+# NOTE: git does not support comments on the same line as a pattern - a
+# trailing "# comment" becomes part of the pattern and silently disables it.
+# That is exactly what happened to an earlier version of this file. Keep every
+# comment on its own line.
+
+# ---------------------------------------------------------------- python
+__pycache__/
+*.pyc
+backend/.venv/
+
+# ------------------------------------------------------------------ node
+frontend/node_modules/
+frontend/dist/
+
+# ---------------------------------------------------- runtime data (machine-specific)
+# Calibration, settings, player roster and selfies, and the self-signed TLS
+# key/cert pair. All of it belongs to this rig, none of it to the project -
+# and config/certs/ contains a private key.
+config/
+
+# ------------------------------------------------------------ release publishing
+# release.toml names your S3 bucket; dist-release/ and staging/ hold built
+# installers, runtime bundles and in-progress update downloads.
+release.toml
+dist-release/
+staging/
+
+# The update-signing private key is irreplaceable and must never be committed.
+# (It normally lives outside the repo at ~/.autodarts/, this is belt-and-braces.)
+*.ed25519
+
+# ------------------------------------------------- diagnostics & session captures
+# Everything below is data captured FROM a live rig, not source: evidence
+# frames and bench labels (clips/), takeout traces, one-off debug renders,
+# server logs. Reproducible by playing; meaningless on another machine.
+clips/
+.tmp_diag/
+logs/
+*.log
+
+# --------------------------------------------------------------- os droppings
+Thumbs.db
+Desktop.ini
+.DS_Store

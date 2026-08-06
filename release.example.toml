@@ -1,0 +1,70 @@
+# Copy to release.toml and fill in. release.toml is git-ignored: it names
+# your host, and there is no reason for that to be public.
+#
+# The signing key is NOT configured here. It lives outside the repository
+# (default ~/.autodarts/release_ed25519) so that a careless `git add -A`
+# cannot publish the one secret that matters.
+#
+# Where releases are hosted is purely a publishing concern: installed apps
+# only ever perform HTTPS GETs against a base URL, and trust a release
+# because of its signature, not because of where it came from. So switching
+# hosts is this file plus a republish, never a code change.
+
+# "github" - push to a repo served by GitHub Pages. Free, no card.
+# "s3"     - any S3-compatible bucket (AWS, Cloudflare R2, Backblaze B2).
+target = "github"
+
+[github]
+# A PUBLIC repo holding only published artefacts. Keep it separate from your
+# source: Pages needs a public repo on the free tier, and that need not mean
+# publishing your source too.
+repo = "your-username/autodarts-updates"
+branch = "main"
+checkout = "dist-release/updates-repo"
+# base_url defaults to https://<owner>.github.io/<name>. Set it only if you
+# put a custom domain in front of Pages.
+# base_url = "https://updates.example.com"
+
+# Used when target = "s3". Works unchanged against Cloudflare R2 and
+# Backblaze B2 - both speak the S3 API; just set endpoint_url.
+[s3]
+# endpoint_url = "https://<account-id>.r2.cloudflarestorage.com"   # R2
+# endpoint_url = "https://s3.eu-central-003.backblazeb2.com"       # B2
+bucket = "your-bucket-name"
+region = "eu-west-2"
+# Everything the updater fetches lives under this prefix. Make *only* this
+# prefix publicly readable; the rest of the bucket stays private.
+prefix = "updates"
+
+# Named profile in ~/.aws/credentials. Keeping credentials there rather than
+# in this file means the repo can never leak a key, and rotating one does not
+# touch the project at all. Omit to use boto3's default chain (environment
+# variables, IAM role).
+profile = "autodarts"
+
+# Only if the bucket grants public read per-object via ACL. Omit when public
+# access comes from a bucket policy, or when Object Ownership is set to
+# "bucket owner enforced" - that setting rejects any ACL.
+# acl = "public-read"
+
+# The public HTTPS base the installed app fetches from. Either the S3
+# website/REST endpoint or, better, a CloudFront distribution in front of it.
+# This value is compiled into each published build.
+base_url = "https://your-bucket-name.s3.eu-west-2.amazonaws.com/updates"
+
+[payload]
+# Everything the app needs at runtime, and nothing else. Deliberately an
+# allowlist: an exclude-list would silently start shipping any new directory
+# someone adds at the top level, including one full of camera footage.
+include = [
+  "VERSION.json",
+  "backend/**/*.py",
+  "backend/requirements.txt",
+  "frontend/dist/**/*",
+]
+exclude = [
+  "**/__pycache__/**",
+  "**/*.pyc",
+  "backend/.venv/**",
+  "backend/dev_server.py",
+]
