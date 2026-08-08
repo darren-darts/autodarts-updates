@@ -30,6 +30,7 @@ if "games" not in sys.modules:
     sys.modules["games"] = _games
 
 from detection.autodarts import (  # noqa: E402
+    AutodartsDetector,
     DartDetected,
     TakeoutFinished,
     TakeoutStarted,
@@ -193,6 +194,93 @@ def test_second_visit_after_reset():
     events = t.update(_state("Throw detected", [b]))
     darts = _darts(events)
     assert len(darts) == 1 and darts[0].dart.label == "S5"
+
+
+# ------------------------------------------------------ stuck-takeout recovery
+
+
+def test_auto_recover_stuck_takeout():
+    """A takeout wedged past the threshold triggers a rate-limited auto-reset,
+    and clears the moment Autodarts moves on."""
+    import asyncio
+
+    import detection.autodarts as ad
+
+    det = AutodartsDetector(
+        on_dart=lambda d: None,
+        on_takeout_finished=lambda: None,
+        stuck_takeout_s=8.0,
+    )
+    calls = []
+
+    async def fake_reset():
+        calls.append(1)
+        return {"reset": True}
+
+    det.reset = fake_reset  # stub out the network POST
+
+    clock = {"t": 1000.0}
+    real_monotonic = ad.time.monotonic
+    ad.time.monotonic = lambda: clock["t"]
+    try:
+        stuck = _state("Takeout started", [])
+
+        # First sighting starts the timer - no reset, not yet flagged stuck.
+        asyncio.run(det._auto_recover_takeout(stuck))
+        assert calls == [] and not det.stuck
+
+        # 5s in: under the 8s threshold, still nothing.
+        clock["t"] = 1005.0
+        asyncio.run(det._auto_recover_takeout(stuck))
+        assert calls == [] and not det.stuck
+
+        # 9s in: past threshold - flagged stuck and one reset fired.
+        clock["t"] = 1009.0
+        asyncio.run(det._auto_recover_takeout(stuck))
+        assert det.stuck and calls == [1] and det.auto_resets == 1
+
+        # 10s: still wedged but within the cooldown - no second reset.
+        clock["t"] = 1010.0
+        asyncio.run(det._auto_recover_takeout(stuck))
+        assert calls == [1]
+
+        # 16s: cooldown elapsed, still wedged - a second nudge.
+        clock["t"] = 1016.0
+        asyncio.run(det._auto_recover_takeout(stuck))
+        assert det.auto_resets == 2
+
+        # Autodarts moves on: stuck clears and the timer resets.
+        clock["t"] = 1017.0
+        asyncio.run(det._auto_recover_takeout(_state("Throw detected", [])))
+        assert not det.stuck and det._takeout_since is None
+    finally:
+        ad.time.monotonic = real_monotonic
+
+
+def test_auto_recover_normal_takeout_not_reset():
+    """A takeout that finishes well within the threshold is never auto-reset."""
+    import asyncio
+
+    import detection.autodarts as ad
+
+    det = AutodartsDetector(
+        on_dart=lambda d: None,
+        on_takeout_finished=lambda: None,
+        stuck_takeout_s=8.0,
+    )
+    calls = []
+    det.reset = lambda: calls.append(1)  # would be awaited; never reached here
+
+    clock = {"t": 500.0}
+    real_monotonic = ad.time.monotonic
+    ad.time.monotonic = lambda: clock["t"]
+    try:
+        asyncio.run(det._auto_recover_takeout(_state("Takeout started", [])))
+        clock["t"] = 503.5  # 3.5s later the board reports the takeout finished
+        asyncio.run(det._auto_recover_takeout(_state("Takeout finished", [], num=0)))
+        assert calls == [] and not det.stuck and det.auto_resets == 0
+    finally:
+        ad.time.monotonic = real_monotonic
 
 
 # ------------------------------------------------------------------- runner

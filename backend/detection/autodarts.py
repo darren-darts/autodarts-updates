@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -33,6 +34,17 @@ log = logging.getLogger("shepdarts.autodarts")
 DEFAULT_URL = "http://127.0.0.1:3180/api/state"
 POLL_INTERVAL_S = 0.1
 HTTP_TIMEOUT_S = 2.0
+
+# Autodarts occasionally wedges reporting a takeout "in progress" and never
+# finishes it - usually a lighting/exposure wobble the cameras read as endless
+# motion. The board then scores nothing until someone hits Reset. When a takeout
+# has been in progress this long, InterDarts fires the same Reset itself to
+# unstick it. Comfortably longer than a real takeout (pulling three darts is a
+# few seconds) so a slow hand is never cut short.
+STUCK_TAKEOUT_S = 8.0
+# If a reset doesn't clear it, nudge again on this interval rather than hammering
+# /api/reset every poll while the board stays wedged.
+AUTO_RESET_COOLDOWN_S = 6.0
 
 # Autodarts reports impact coordinates normalised so the outer double wire (the
 # scoring edge) sits at radius 1.0, with x+ right and y+ UP. Board space here is
@@ -216,6 +228,8 @@ class AutodartsDetector:
         on_takeout_started: Optional[Callable[[], None]] = None,
         url: str = DEFAULT_URL,
         poll_interval: float = POLL_INTERVAL_S,
+        stuck_takeout_s: float = STUCK_TAKEOUT_S,
+        auto_recover: bool = True,
     ) -> None:
         self._on_dart = on_dart
         self._on_takeout_finished = on_takeout_finished
@@ -226,10 +240,18 @@ class AutodartsDetector:
         self._task: Optional[asyncio.Task] = None
         self._client = None  # httpx.AsyncClient, created in start()
 
+        # Stuck-takeout auto-recovery.
+        self._auto_recover = auto_recover
+        self._stuck_takeout_s = stuck_takeout_s
+        self._takeout_since: Optional[float] = None   # monotonic, when takeout began
+        self._last_auto_reset = 0.0                   # monotonic, last auto-reset
+
         # Health, surfaced at /api/detection/autodarts.
         self.available = False   # did the last request succeed?
         self.connected = False   # Autodarts reports cameras connected
         self.running = False     # Autodarts reports its board running
+        self.stuck = False       # takeout wedged; we are auto-resetting to recover
+        self.auto_resets = 0     # how many auto-resets fired this lifetime
         self._last_error: Optional[str] = None
         self._offline_logged = False
 
@@ -265,6 +287,8 @@ class AutodartsDetector:
             "available": self.available,
             "connected": self.connected,
             "running": self.running,
+            "stuck": self.stuck,
+            "auto_resets": self.auto_resets,
             "error": self._last_error,
         }
 
@@ -316,6 +340,43 @@ class AutodartsDetector:
         self._mark_online(state)
         for event in self._tracker.update(state):
             self._dispatch(event)
+        await self._auto_recover_takeout(state)
+
+    async def _auto_recover_takeout(self, state: dict) -> None:
+        """Nudge Autodarts out of a takeout it has got wedged in.
+
+        Takeout events here are read straight from the raw state, not the
+        filtered VisitTracker stream, because a board can be stuck in takeout
+        with no InterDarts visit in play at all (e.g. left wedged from a previous
+        session). While `event` stays "Takeout started" past the threshold, fire
+        the same Reset the Board Manager's button does, rate-limited by a cooldown
+        so a genuinely broken board is nudged occasionally rather than hammered.
+        """
+        if not self._auto_recover:
+            return
+        now = time.monotonic()
+        if state.get("event") != "Takeout started":
+            self._takeout_since = None
+            self.stuck = False
+            return
+        if self._takeout_since is None:
+            self._takeout_since = now
+            return
+        if now - self._takeout_since < self._stuck_takeout_s:
+            return
+        self.stuck = True
+        if now - self._last_auto_reset < AUTO_RESET_COOLDOWN_S:
+            return
+        self._last_auto_reset = now
+        try:
+            await self.reset()
+            self.auto_resets += 1
+            log.warning(
+                "Autodarts wedged in takeout for %.0fs - auto-reset #%d fired",
+                now - self._takeout_since, self.auto_resets,
+            )
+        except Exception as exc:
+            log.warning("Autodarts auto-reset failed: %s", exc)
 
     def _dispatch(self, event) -> None:
         if isinstance(event, DartDetected):
@@ -347,4 +408,8 @@ class AutodartsDetector:
         self.available = False
         self.connected = False
         self.running = False
+        # An unreachable board can't be stuck-in-takeout from our side; clear the
+        # recovery state so it starts fresh when it comes back.
+        self.stuck = False
+        self._takeout_since = None
         self._last_error = err

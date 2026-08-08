@@ -151,6 +151,7 @@ const scan = computed(() => {
   if (!d.available) return { label: 'AUTODARTS OFFLINE', detail: 'Detection service unreachable — start Autodarts, then check the Board Manager', tone: 'bad' }
   if (!d.connected) return { label: 'CAMERAS OFFLINE', detail: 'Autodarts is up but its cameras aren’t connected — open the Board Manager (:3180)', tone: 'bad' }
   if (!d.running) return { label: 'BOARD IDLE', detail: 'Start a game in Autodarts (lobby) so it begins detecting throws', tone: 'warn' }
+  if (d.stuck) return { label: 'BOARD STUCK — RESETTING', detail: 'Autodarts is wedged in a takeout; auto-resetting to recover. If it keeps happening, fix the board lighting / camera exposure.', tone: 'warn' }
   return { label: 'SCANNING', detail: 'Autodarts live · darts score automatically', tone: 'good' }
 })
 
