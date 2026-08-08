@@ -1,4 +1,4 @@
-"""Autodarts launcher: apply any staged update, then run the app.
+"""ShepDarts launcher: apply any staged update, then run the app.
 
 Installed at the root of the install tree, *outside* `app/`. That placement
 is the whole point rather than an accident:
@@ -14,15 +14,27 @@ is the whole point rather than an accident:
 So the sequence is: swap, then start. Never both at once.
 
 This file is part of the install, not the update payload - it changes rarely
-and is refreshed by re-running the installer. A release that requires a
-newer launcher declares it via `min_runtime` in its manifest, which the
-in-app updater checks *before* downloading, so an install can never end up
-with an app its launcher cannot start.
+and is refreshed by re-running the installer.
+
+A release that needs a dependency this runtime does not have declares it via
+`min_runtime` in its manifest. What happens with that differs by platform,
+and both halves matter for updates to actually reach everyone:
+
+* **Windows**: the bundled interpreter has pip stripped out after it is
+  built (~25MB saved - see tools/build_runtime.py), so it cannot gain a
+  dependency at all. `update/client.py` checks `min_runtime` *before*
+  downloading and refuses outright, pointing at a new installer instead.
+* **Pi**: the runtime is a venv built from the OS's own python3, so pip is
+  right there. `update/client.py` does NOT gate this case - it is handled
+  here instead, in `sync_runtime_dependencies`, right after a successful
+  swap. A dependency install that fails is rolled back exactly like a failed
+  file swap, so this can never leave a half-updated app running.
 
 Stdlib only, by rule. It has to work when `app/` is mid-swap or broken.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -31,6 +43,8 @@ import sys
 import time
 import webbrowser
 from pathlib import Path
+
+IS_WINDOWS = os.name == "nt"
 
 ROOT = Path(__file__).resolve().parent
 APP = ROOT / "app"
@@ -44,6 +58,8 @@ RESULT = ROOT / "last_update.json"
 
 HOST = os.environ.get("AUTODARTS_HOST", "0.0.0.0")
 PORT = os.environ.get("AUTODARTS_PORT", "8000")
+RUNTIME_INFO = ROOT / "runtime" / "RUNTIME.json"
+PIP_INSTALL_TIMEOUT_SECONDS = 600  # generous: opencv/numpy are slow, but rare
 
 # A freshly applied update that dies within this many seconds is treated as
 # broken and rolled back. Long enough for uvicorn to bind a port and import
@@ -132,6 +148,93 @@ def swap(source: Path, message: str) -> str:
     return ""
 
 
+def unswap() -> None:
+    """Undo a successful swap() - put PREVIOUS back as APP.
+
+    Used when the swap itself worked but something the new app/ needs then
+    failed - see sync_runtime_dependencies. That has to be treated exactly
+    like a swap failure: retried, and given up on after MAX_APPLY_ATTEMPTS,
+    never left running a half-updated app. Leaving the rejected app parked at
+    INCOMING (rather than deleting it) matters because apply_pending's retry
+    path expects exactly that name when it re-stages a failed attempt.
+    """
+    if not PREVIOUS.exists():
+        return  # nothing to restore - leave APP as it is
+    if APP.exists():
+        rename_with_retry(APP, INCOMING)
+    rename_with_retry(PREVIOUS, APP)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def sync_runtime_dependencies(pending: dict) -> str:
+    """POSIX only: pip-install into runtime/ if requirements.txt changed.
+
+    Returns "" on success (including "nothing needed doing"), or an error
+    message that apply_pending treats the same way it treats a failed swap.
+
+    Compares the file ON DISK after the swap against what RUNTIME.json last
+    recorded, rather than trusting `pending["requirements_sha256"]` at face
+    value - self-healing if that marker is ever missing or stale, where
+    trusting metadata would stay wrong until something else fixed it by hand.
+    Most updates touch no dependency at all, so the common case is one hash
+    comparison and nothing else - not a pip invocation every time.
+    """
+    requirements = APP / "backend" / "requirements.txt"
+    if not requirements.is_file():
+        return ""  # nothing declared - nothing to install
+
+    pip = ROOT / "runtime" / "bin" / "pip"
+    if not pip.is_file():
+        return ""  # no managed venv here (e.g. a hand-run checkout) - not ours to touch
+
+    current_hash = _sha256_file(requirements)
+    try:
+        info = json.loads(RUNTIME_INFO.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        info = {}
+    if info.get("requirements_sha256") == current_hash:
+        return ""  # already satisfied
+
+    log(f"Dependencies changed - installing into {pip.parent.parent}...")
+    try:
+        result = subprocess.run(
+            [
+                str(pip), "install", "--upgrade", "--quiet", "--no-input",
+                "--disable-pip-version-check", "-r", str(requirements),
+            ],
+            capture_output=True, text=True, timeout=PIP_INSTALL_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return f"pip install did not finish within {PIP_INSTALL_TIMEOUT_SECONDS}s"
+    if result.returncode != 0:
+        # The last non-blank line is normally pip's actual complaint ("No
+        # matching distribution found for ...") - the lines above it are
+        # usually a resolver trace nobody needs to see in a status message.
+        lines = [line for line in (result.stderr or result.stdout).splitlines() if line.strip()]
+        return f"pip install failed: {lines[-1] if lines else 'unknown error'}"
+
+    info["requirements_sha256"] = current_hash
+    info.setdefault("platform", "posix")
+    # A dependency sync satisfies whatever min_runtime asked for it, so this
+    # is what lets a future _check_runtime (if that gate is ever extended to
+    # POSIX) see the install as caught up rather than stuck at whatever
+    # install-pi.sh happened to write once, forever.
+    info["version"] = pending.get("min_runtime") or info.get("version", "0.0.0")
+    try:
+        RUNTIME_INFO.write_text(json.dumps(info, indent=2), encoding="utf-8")
+    except OSError as exc:
+        return f"installed dependencies but could not record it: {exc}"
+    log("Dependencies installed.")
+    return ""
+
+
 def apply_pending() -> str:
     """Apply a staged update if one is waiting. Returns the version applied, or ""."""
     pending = read_pending()
@@ -163,13 +266,21 @@ def apply_pending() -> str:
         return ""
 
     error = swap(INCOMING, f"Applying update {version}...")
+    if not error and not IS_WINDOWS:
+        error = sync_runtime_dependencies(pending)
+        if error:
+            log(f"  dependency install failed: {error}")
+            unswap()  # leaves the rejected app parked at INCOMING, as swap's own failure does
+
     if error:
-        # Most causes are transient - a virus scanner mid-scan, or a server
-        # that has not finished releasing its handles. Throwing away a
-        # correctly downloaded update over that would be a poor trade, so the
-        # staged tree is put back and retried on the next start. A genuinely
-        # stuck install (permissions, a stray process) gives up after a few
-        # tries rather than retrying forever.
+        # Most causes are transient - a virus scanner mid-scan, a server that
+        # has not finished releasing its handles, or (Pi only, since the
+        # check above) a dependency download that dropped mid-transfer.
+        # Throwing away a correctly downloaded update over that would be a
+        # poor trade, so the staged tree is put back and retried on the next
+        # start. A genuinely stuck install (permissions, a stray process, a
+        # dependency that will never install) gives up after a few tries
+        # rather than retrying forever.
         attempts = int(pending.get("attempts", 0)) + 1
         try:
             shutil.move(str(INCOMING), str(staged))
@@ -180,7 +291,7 @@ def apply_pending() -> str:
         if attempts >= MAX_APPLY_ATTEMPTS:
             shutil.rmtree(staged, ignore_errors=True)
             PENDING.unlink(missing_ok=True)
-            record("failed", version, f"Could not replace the application folder: {error}")
+            record("failed", version, f"Could not finish applying the update: {error}")
             log(f"Giving up on update {version} after {attempts} attempts.")
         else:
             pending["attempts"] = attempts
@@ -257,6 +368,62 @@ def start_server() -> subprocess.Popen:
     return subprocess.Popen(command, cwd=str(ROOT), env=environment())
 
 
+# The main screen should look like an appliance, not a web page. A phone
+# starting a game can put the play view into its fullscreen layout, but it
+# cannot call the browser's Fullscreen API on another machine - that needs a
+# click on the machine itself - so the address bar would survive. Opening the
+# display fullscreen in the first place is what removes it for good.
+#
+# Only Chromium-family browsers take a flag for this; anything else falls back
+# to a normal window, where the app's own fullscreen button still works. Set
+# AUTODARTS_BROWSER_WINDOWED=1 for a plain window (handy while developing).
+CHROMIUM_ON_WINDOWS = (
+    r"Google\Chrome\Application\chrome.exe",
+    r"Microsoft\Edge\Application\msedge.exe",
+)
+CHROMIUM_ON_LINUX = ("chromium-browser", "chromium", "google-chrome", "google-chrome-stable")
+
+CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+
+def fullscreen_browser() -> str:
+    """Path to a browser that can be told to start fullscreen, or ""."""
+    if os.environ.get("AUTODARTS_BROWSER_WINDOWED") == "1":
+        return ""
+    if os.name == "nt":
+        roots = ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA")
+        for root in filter(None, (os.environ.get(name, "") for name in roots)):
+            for relative in CHROMIUM_ON_WINDOWS:
+                candidate = Path(root) / relative
+                if candidate.is_file():
+                    return str(candidate)
+        return ""
+    for name in CHROMIUM_ON_LINUX:
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
+
+
+def open_display(url: str) -> None:
+    browser = fullscreen_browser()
+    if not browser:
+        webbrowser.open(url)
+        return
+    try:
+        # Broken out of the job object deliberately. That job exists so the
+        # *server* can never outlive this launcher; the display is the user's
+        # own window and closing the app should not shoot it down mid-throw.
+        # If the flag is refused the fallback below still opens the page.
+        subprocess.Popen(
+            [browser, "--start-fullscreen", url],
+            creationflags=CREATE_BREAKAWAY_FROM_JOB if os.name == "nt" else 0,
+        )
+    except OSError as exc:
+        log(f"(could not start the browser fullscreen: {exc})")
+        webbrowser.open(url)
+
+
 def tie_children_to_this_process() -> None:
     """Windows: make the server die whenever this launcher does.
 
@@ -311,6 +478,7 @@ def tie_children_to_this_process() -> None:
                 ("PeakJobMemoryUsed", ctypes.c_size_t),
             ]
 
+        JOB_OBJECT_LIMIT_BREAKAWAY_OK = 0x0800
         JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
         JobObjectExtendedLimitInformation = 9
 
@@ -337,7 +505,12 @@ def tie_children_to_this_process() -> None:
             return
 
         info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION()
-        info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        # BREAKAWAY_OK is what lets the browser be launched outside the job -
+        # see open_display(). Everything that does not ask to break away, the
+        # server included, still dies with this launcher.
+        info.BasicLimitInformation.LimitFlags = (
+            JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE | JOB_OBJECT_LIMIT_BREAKAWAY_OK
+        )
         if not kernel32.SetInformationJobObject(
             job, JobObjectExtendedLimitInformation, ctypes.byref(info), ctypes.sizeof(info)
         ):
@@ -413,7 +586,7 @@ def main() -> int:
                 shutil.rmtree(APP, ignore_errors=True)
                 PREVIOUS.rename(APP)
             else:
-                log("app/ is missing and cannot be recovered. Please reinstall Autodarts.")
+                log("app/ is missing and cannot be recovered. Please reinstall ShepDarts.")
                 return 1
 
         started = time.time()
@@ -422,7 +595,7 @@ def main() -> int:
         if first_run and os.environ.get("AUTODARTS_NO_BROWSER") != "1":
             time.sleep(2.5)
             if process.poll() is None:
-                webbrowser.open(f"http://localhost:{PORT}/")
+                open_display(f"http://localhost:{PORT}/")
         first_run = False
 
         try:
