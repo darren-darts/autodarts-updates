@@ -232,11 +232,12 @@ onMounted(load)
 
 .tile {
   display: grid;
-  grid-template-columns: 96px 1fr;
+  grid-template-columns: 92px 1fr;
   gap: 0.7rem;
-  padding: 0;
-  overflow: hidden;
-  align-items: stretch;
+  padding: 0.55rem;
+  /* Centre the thumbnail rather than stretching it, so a card with a long
+     tagline can't blow the art up and crowd the title. */
+  align-items: center;
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--panel);
@@ -251,8 +252,10 @@ onMounted(load)
 }
 
 .art {
-  aspect-ratio: 16 / 10;
+  width: 92px;
+  height: 58px;
   overflow: hidden;
+  border-radius: 8px;
 }
 
 .tile-meta {
@@ -260,7 +263,7 @@ onMounted(load)
   flex-direction: column;
   justify-content: center;
   gap: 0.15rem;
-  padding: 0.55rem 0.6rem 0.55rem 0;
+  min-width: 0;
 }
 
 .tile-meta strong {

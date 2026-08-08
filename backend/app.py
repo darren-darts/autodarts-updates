@@ -5,6 +5,7 @@ Run from the backend/ directory:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import socket
 from contextlib import asynccontextmanager
@@ -12,19 +13,17 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 import paths
 import settings_store
-from calibration.routes import router as calibration_router
-from capture.devices import list_devices
-from capture.manager import CaptureManager
-from detection.pipeline import DetectionManager
-from detection.routes import router as detection_router
+from calibration import board_model
+from detection.autodarts import AutodartsDetector
 from display import router as display_router
 from events import hub
+from games.engine import match_engine
 from games.routes import router as games_router
 from leds.controller import led_controller
 from leds.effects import EFFECTS
@@ -38,8 +37,35 @@ from update.routes import router as update_router
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("autodarts")
 
-manager = CaptureManager()
-detection_manager = DetectionManager(manager)
+
+def _on_autodarts_takeout() -> None:
+    """Darts pulled out of the board = the visit is over.
+
+    Mirrors the manual "Darts removed" button: fire the red takeout flash and
+    advance the engine. next_turn broadcasts the new game.state, which is what
+    clears the takeout prompt on every screen. cue=False so next_turn's own blue
+    comet doesn't overwrite the red flash a few milliseconds later.
+    """
+    led_controller.flash_cue("takeout", duration_s=0.5)
+    match_engine.next_turn(cue=False)
+    # The play screen listens for this to play its takeout sound and the "darts
+    # coming out" flash - same event the old CV takeout broadcast. We're on the
+    # event loop here (called from the detector's async poll task), so schedule
+    # the async broadcast rather than awaiting it.
+    try:
+        asyncio.get_running_loop().create_task(hub.broadcast({"type": "detection.takeout"}))
+    except RuntimeError:
+        pass
+
+
+# Autodarts is now the detection source: it owns the cameras, calibration and
+# dart localisation, and we consume scored darts from its local Board Manager
+# API. The engine is fed exactly as the old CV pipeline fed it (submit_dart /
+# next_turn), so no game knows the difference. Started/stopped in the lifespan.
+autodarts_detector = AutodartsDetector(
+    on_dart=match_engine.submit_dart,
+    on_takeout_finished=_on_autodarts_takeout,
+)
 
 
 @asynccontextmanager
@@ -49,20 +75,25 @@ async def lifespan(app: FastAPI):
     # Also the state momentary cues (e.g. the dart-detected flash) fall back to.
     led_controller.set_resting_cue("startup")
 
-    # Release the hardware before an update restart, which exits hard rather
-    # than waiting on uvicorn's graceful shutdown (see update/restart.py).
-    # Without this the new process would find the cameras and serial port
-    # still held by the old one.
+    # Release the LED serial port before an update restart, which exits hard
+    # rather than waiting on uvicorn's graceful shutdown (see update/restart.py).
+    # Without this the new process would find the port still held by the old one.
+    # (Cameras are Autodarts' concern now, not ours.)
     update_restart.set_shutdown_hook(_release_hardware)
     update_routes.start_background_check()
 
+    # The engine broadcasts game.state from the detector's thread/task, so it
+    # needs the running loop; bind it here rather than only when a game starts,
+    # so a dart detected before the first /api/games/start still lands.
+    match_engine.bind_loop(asyncio.get_running_loop())
+    await autodarts_detector.start()
+
     yield
+    await autodarts_detector.stop()
     _release_hardware()
 
 
 def _release_hardware() -> None:
-    detection_manager.stop_all()
-    manager.stop_all()
     led_controller.stop()
 
 
@@ -77,8 +108,6 @@ app.add_middleware(
 )
 
 app.include_router(players_router)
-app.include_router(calibration_router)
-app.include_router(detection_router)
 app.include_router(games_router)
 app.include_router(display_router)
 app.include_router(update_router)
@@ -99,69 +128,11 @@ async def ws_endpoint(websocket: WebSocket):
         await hub.disconnect(websocket)
 
 
-# ---------------------------------------------------------------- cameras
-
-@app.get("/api/cameras")
-def get_cameras():
-    return {"devices": list_devices()}
-
-
-@app.get("/api/cameras/{device_id}/stream")
-def stream_camera(device_id: int):
-    """MJPEG live preview; camera is opened on demand and closed when the
-    last viewer disconnects."""
-    capture = settings_store.load()["capture"]
-    stream = manager.acquire(
-        device_id, capture["width"], capture["height"], capture["fps"]
-    )
-
-    def frames():
-        last = 0
-        try:
-            while True:
-                jpeg, last = stream.next_jpeg(last, timeout=2.0)
-                if jpeg is None:
-                    if stream.error:
-                        break
-                    continue
-                yield (
-                    b"--frame\r\nContent-Type: image/jpeg\r\n"
-                    b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n"
-                    + jpeg + b"\r\n"
-                )
-        finally:
-            manager.release(device_id)
-
-    return StreamingResponse(
-        frames(), media_type="multipart/x-mixed-replace; boundary=frame"
-    )
-
-
 # ---------------------------------------------------------------- settings
-
-class CameraSlot(BaseModel):
-    device_id: int
-    name: str = ""
-
-
-class CameraSelection(BaseModel):
-    slots: list[CameraSlot | None] = Field(min_length=3, max_length=3)
-
 
 @app.get("/api/settings")
 def get_settings():
     return settings_store.load()
-
-
-@app.put("/api/settings/cameras")
-def put_camera_settings(selection: CameraSelection):
-    chosen = [s.device_id for s in selection.slots if s is not None]
-    if len(chosen) != len(set(chosen)):
-        raise HTTPException(400, "the same device is assigned to more than one slot")
-    settings = settings_store.update(
-        "cameras", {"slots": [s.model_dump() if s else None for s in selection.slots]}
-    )
-    return settings
 
 
 # ------------------------------------------------------------------ LEDs
@@ -233,6 +204,46 @@ def network_info():
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/api/detection/autodarts")
+def autodarts_detector_status():
+    """Is the Autodarts detection service reachable, connected and running?
+
+    The UI uses this to tell the difference between "no darts because nobody's
+    thrown" and "no darts because Autodarts isn't up" - and to offer a link to
+    the Board Manager (http://<device-ip>:3180) for camera setup, which stays
+    Autodarts' responsibility rather than something InterDarts reimplements.
+    """
+    return autodarts_detector.status()
+
+
+@app.post("/api/detection/autodarts/reset")
+async def autodarts_reset():
+    """Reset Autodarts' board detection - the same "Manual reset" its own Board
+    Manager fires. For a mis-detected visit: clear what the board currently sees
+    so the darts can be thrown again, without leaving the play screen.
+    """
+    try:
+        return await autodarts_detector.reset()
+    except Exception as exc:
+        raise HTTPException(503, f"could not reset the Autodarts board: {exc}")
+
+
+@app.get("/api/detection/board-geometry")
+def board_geometry():
+    """Static dartboard geometry (radii + segment order) for drawing the
+    front-on board diagram client-side. The frontend computes wedge shapes
+    itself from this rather than duplicating board_model's constants, so there
+    is exactly one source of truth for segment order and radii. Kept from the
+    old detection router because the live play board (DartboardFace) needs it,
+    independent of how darts are now detected.
+    """
+    return {
+        "physical_board_radius_mm": board_model.PHYSICAL_BOARD_RADIUS_MM,
+        "radii_mm": board_model.RADII_MM,
+        "segments": board_model.SEGMENTS,
+    }
 
 
 # ------------------------------------------------------- built frontend

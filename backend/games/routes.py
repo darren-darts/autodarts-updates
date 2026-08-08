@@ -53,23 +53,10 @@ async def start(body: StartIn):
     except ValueError as e:
         raise HTTPException(400, str(e))
 
-    # Starting a game has to start the cameras too - otherwise the board
-    # scores nothing and the only clue is that darts never appear. Reported
-    # rather than raised: a game is still perfectly playable with the manual
-    # keypad if the cameras aren't calibrated yet.
-    from app import detection_manager
-
-    detection = detection_manager.status()
-    if not detection.get("active"):
-        result = detection_manager.start(loop)
-        state["detection"] = {
-            "started": result.get("started", False),
-            "error": result.get("error"),
-            "camera_ids": result.get("camera_ids", []),
-        }
-    else:
-        state["detection"] = {"started": True, "error": None,
-                              "camera_ids": detection.get("camera_ids", [])}
+    # Detection no longer needs starting per-game: Autodarts runs continuously
+    # (it owns the cameras and localisation) and the AutodartsDetector polls it
+    # from app startup, feeding scored darts straight into the engine. The play
+    # screen surfaces Autodarts' health via /api/detection/autodarts.
 
     # Starting a game fills the main screen, whoever started it. A phone can't
     # call the browser's Fullscreen API on another machine, so this is the

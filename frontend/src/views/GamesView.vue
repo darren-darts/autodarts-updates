@@ -18,6 +18,7 @@ const filter = ref('All')
 const x01Start = ref(501)
 const x01Finish = ref('double')   // 'double' | 'straight'
 const spaceRoundLimit = ref('')
+const choreRounds = ref(10)
 
 // The three headline games get bespoke, mock-matched setup screens; the
 // difficulty entries themselves still come from the registry.
@@ -34,6 +35,7 @@ const slug = computed(() => selected.value?.slug)
 const isKiller = computed(() => slug.value === 'killer')
 const isSpace = computed(() => slug.value === 'space-invaders')
 const isX01 = computed(() => slug.value === 'x01')
+const isChores = computed(() => slug.value === 'mr-vs-mrs')
 
 const playerLimit = computed(() => {
   if (!selected.value) return 8
@@ -66,6 +68,9 @@ const setupHint = computed(() => {
   if (isX01.value) {
     return `Every player starts on ${x01Start.value} · ${x01Finish.value === 'double' ? 'finish on a double' : 'any dart can finish'}.`
   }
+  if (isChores.value) {
+    return `${choreRounds.value} chores · one dart each · loser does it · the wheel decides the rest.`
+  }
   return 'Names and avatars come from your player roster.'
 })
 
@@ -86,6 +91,7 @@ function openGame(game) {
   x01Start.value = 501
   x01Finish.value = 'double'
   spaceRoundLimit.value = ''
+  choreRounds.value = 10
   // Default to everyone: the common case is "we're all playing".
   chosenPlayers.value = new Set(players.value.slice(0, game.max_players).map((p) => p.id))
   error.value = null
@@ -123,6 +129,10 @@ async function startGame() {
     } else if (isSpace.value) {
       const limit = Number(spaceRoundLimit.value)
       options = Number.isFinite(limit) && limit >= 1 ? { round_limit: Math.min(99, Math.round(limit)) } : {}
+    } else if (isChores.value) {
+      // The round count is picked here rather than through the difficulty, so
+      // the difficulty keeps its own 5/10/15 defaults for a phone-started game.
+      options = { rounds: choreRounds.value }
     }
     await api.startGame(selected.value.slug, diff, [...chosenPlayers.value], options)
     router.push('/play')
@@ -215,6 +225,20 @@ onMounted(load)
           <select v-model="x01Finish" aria-label="X01 finish rule">
             <option value="double">Double out</option>
             <option value="straight">Straight out</option>
+          </select>
+        </label>
+      </div>
+
+      <!-- mr vs mrs game length -->
+      <div v-else-if="isChores" class="option-row x01-row">
+        <div class="option-copy">
+          <small>CHORE CHALLENGE</small>
+          <strong>How many chores are you settling this week?</strong>
+        </div>
+        <label class="option-setting x01-setting">
+          <span><small>CHORE ROUNDS</small><b>Anything from 5 to 15</b></span>
+          <select v-model.number="choreRounds" aria-label="Number of chore rounds">
+            <option v-for="n in 11" :key="n" :value="n + 4">{{ n + 4 }} rounds</option>
           </select>
         </label>
       </div>

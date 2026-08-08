@@ -23,16 +23,74 @@ from .registry import register
 # The physical board order, clockwise from the top.
 SEGMENTS_CLOCKWISE = [20, 1, 18, 4, 13, 6, 10, 15, 2, 17, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5]
 
-# Numbers handed out to players, ordered so neighbours aren't adjacent on
-# the board - used by Donkey Derby.
-ASSIGNABLE = [20, 3, 19, 7, 16, 8, 11, 14, 9, 12, 5, 1, 18, 4, 13, 6, 10, 15, 2, 17]
+# Donkey Derby's numbers used to come from a hand-ordered list here, taken
+# from the front. See _assign_numbers for why there is no list any more.
 
 
-def _assign_numbers(players: list[PlayerState], seed: int = 0) -> dict[str, int]:
-    pool = ASSIGNABLE[:]
-    if seed:
-        random.Random(seed).shuffle(pool)
-    return {p.player_id: pool[i % len(pool)] for i, p in enumerate(players)}
+def _adjacent_on_board(numbers: list[int]) -> bool:
+    """Do any two of these sit next to each other on the physical board?"""
+    spots = [SEGMENTS_CLOCKWISE.index(number) for number in numbers]
+    return any(
+        (a - b) % len(SEGMENTS_CLOCKWISE) in (1, len(SEGMENTS_CLOCKWISE) - 1)
+        for i, a in enumerate(spots)
+        for b in spots[i + 1:]
+    )
+
+
+def _spread_positions(count: int, rng: random.Random) -> list[int]:
+    """`count` slice positions around the board, no two of them neighbours.
+
+    Built from its gaps rather than sampled and re-sampled. Rejection looks
+    simpler but degrades exactly where the spread matters most: fewer than 1%
+    of random 8-from-20 deals avoid neighbours, so a bounded retry falls back
+    to an unspread deal nearly every time - measured, 97 times in 100.
+
+    Choosing the gaps instead cannot fail. Every gap starts at 2 (which is
+    what "not neighbours" means) and the slack left over, `ring - 2 * count`,
+    is shared out at random; the gaps then sum to exactly one lap of the
+    board. A random starting slice rotates the whole arrangement, so no
+    position is favoured.
+    """
+    ring = len(SEGMENTS_CLOCKWISE)
+    if count * 2 > ring:
+        # More players than the board can space out - deal flat and let them
+        # take their chances; Derby caps at 8, so this is for safety only.
+        return rng.sample(range(ring), count)
+
+    slack = ring - 2 * count
+    # A uniform composition of `slack` into `count` non-negative parts:
+    # cut points chosen with repetition, then successive differences.
+    cuts = sorted(rng.choices(range(slack + 1), k=count - 1)) if count > 1 else []
+    bounds = [0, *cuts, slack]
+    gaps = [2 + bounds[i + 1] - bounds[i] for i in range(count)]
+
+    start = rng.randrange(ring)
+    positions, at = [], start
+    for gap in gaps:
+        positions.append(at % ring)
+        at += gap
+    return positions
+
+
+def _assign_numbers(players: list[PlayerState], rng: random.Random) -> dict[str, int]:
+    """One number each, and a different set every game.
+
+    A hand-ordered list used to be the entire mechanism: numbers written out
+    so that consecutive entries sit apart on the board, dealt from the front,
+    which spread the field around it. Nothing ever shuffled that list, though
+    - the old `seed` argument defaulted to 0, which is falsy, and Donkey Derby
+    never passed one - so player 1 drew 20 and player 2 drew 3 in every game
+    that was ever played.
+
+    The spread is still worth having, because a dart that misses your own bed
+    lands in a neighbouring one: two players holding neighbours would turn
+    near-misses into free shoves. So the numbers are dealt spread AND random,
+    rather than one or the other. Deterministic for a given rng, because undo
+    replays the match through a fresh instance and must deal the same numbers.
+    """
+    numbers = [SEGMENTS_CLOCKWISE[spot] for spot in _spread_positions(len(players), rng)]
+    rng.shuffle(numbers)   # spread decides which numbers, not who gets them
+    return {player.player_id: numbers[i] for i, player in enumerate(players)}
 
 
 # ---------------------------------------------------------------- killer
@@ -202,35 +260,71 @@ class DonkeyDerby(Game):
     def __init__(self, players, difficulty, options=None):
         super().__init__(players, difficulty, options)
         self.track = int(self.options.get("track", 12))
-        self.numbers = _assign_numbers(self.players)
+        # The seed lives in options, so the rebuild an undo performs reads the
+        # same one back and deals the same numbers - see Killer above, and
+        # ADDING_A_GAME.md section 2, rule 2.
+        seed = self.options.setdefault("seed", random.randrange(1 << 30))
+        self.numbers = _assign_numbers(self.players, random.Random(seed))
         for player in self.players:
             player.score = 0   # steps travelled
             player.stats = {"number": self.numbers[player.player_id]}
 
     def apply_dart(self, player: PlayerState, dart: Dart, dart_index: int) -> TurnResult:
         own = self.numbers[player.player_id]
-        steps = 0
-        if dart.hits(own):
-            steps = {1: 1, 2: 2, 3: 3}.get(dart.multiplier, 0)
-        elif dart.is_bull or dart.is_outer_bull:
-            steps = 1   # wildcard
-
-        if steps == 0:
+        steps = {1: 1, 2: 2, 3: 3}.get(dart.multiplier, 0)
+        if steps == 0 or dart.segment is None:
             return TurnResult()
 
-        player.score = min(player.score + steps, self.track)
+        if dart.hits(own):
+            player.score = min(player.score + steps, self.track)
+        else:
+            rival = next(
+                (candidate for candidate in self.players
+                 if candidate is not player and self.numbers[candidate.player_id] == dart.segment),
+                None,
+            )
+            if rival is None:
+                return TurnResult()
+            previous = rival.score
+            rival.score = max(0, rival.score - steps)
+            moved = previous - rival.score
+            if moved == 0:
+                return TurnResult(
+                    message=f"Blocked! {rival.name}'s donkey is already at the start gate.",
+                    highlight="good",
+                )
+            shove = {1: "Nudge", 2: "Shove", 3: "BIG SHOVE"}[steps]
+            return TurnResult(
+                message=f"{shove}! {rival.name} goes back {moved} step{'s' if moved != 1 else ''}.",
+                highlight="big" if steps == 3 else "good",
+            )
+
         if player.score >= self.track:
-            self.finish_player(player)
+            self.finished = True
+            self.winner_id = player.player_id
+            player.finished = True
+            player.place = 1
+            trailing = sorted(
+                (candidate for candidate in self.players if candidate is not player),
+                key=lambda candidate: candidate.score,
+                reverse=True,
+            )
+            for place, candidate in enumerate(trailing, 2):
+                candidate.finished = True
+                candidate.place = place
             return TurnResult(finished=True, message=f"{player.name}'s donkey wins the race!",
                               cue="game.win", highlight="big")
         gallop = {1: "Trot", 2: "Canter", 3: "GALLOP"}[steps]
-        return TurnResult(message=f"{gallop}! {player.score}/{self.track}", highlight="good")
+        return TurnResult(
+            message=f"{gallop}! {player.name} moves forward {steps} step{'s' if steps != 1 else ''}.",
+            highlight="big" if steps == 3 else "good",
+        )
 
     def target_hint(self, player: PlayerState) -> str | None:
-        return f"Hit {self.numbers[player.player_id]} to move (bull = wildcard)"
+        return f"Hit {self.numbers[player.player_id]} to race forward - or a rival's number to send them back"
 
     def highlight_numbers(self, player: PlayerState) -> list[int]:
-        return [self.numbers[player.player_id], 25]
+        return list(self.numbers.values())
 
     def theme(self) -> str:
         return "derby"

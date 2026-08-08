@@ -10,6 +10,10 @@ const chosenIp = ref(null)
 const canvas = ref(null)
 const error = ref(null)
 
+// Camera setup/calibration now live in the Autodarts Board Manager (default
+// port 3180 on this host), not in InterDarts.
+const boardManagerUrl = computed(() => `http://${window.location.hostname}:3180`)
+
 // The main screen's own browser may be pointed at "localhost", which a
 // phone on the same network can't reach - so the QR always encodes the
 // server's LAN IP instead, keeping the current protocol/port.
@@ -89,10 +93,9 @@ onMounted(() => {
 
       <div class="card">
         <h3>Setup &amp; tools</h3>
-        <p class="muted">Configure cameras, calibration, and the LED surround.</p>
+        <p class="muted">Dart cameras and calibration live in the Autodarts Board Manager; the LED surround is configured here.</p>
         <div class="nav-cards">
-          <router-link class="ghost nav-card" to="/setup">Camera setup</router-link>
-          <router-link class="ghost nav-card" to="/calibration">Calibration</router-link>
+          <a class="ghost nav-card" :href="boardManagerUrl" target="_blank" rel="noopener">Dart cameras</a>
           <router-link class="ghost nav-card" to="/leds">LEDs</router-link>
         </div>
       </div>

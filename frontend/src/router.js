@@ -1,8 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import HomeView from './views/HomeView.vue'
-import SetupView from './views/SetupView.vue'
-import CalibrationView from './views/CalibrationView.vue'
-import DetectionView from './views/DetectionView.vue'
 import LedsView from './views/LedsView.vue'
 import PlayersView from './views/PlayersView.vue'
 import JoinView from './views/JoinView.vue'
@@ -17,9 +14,6 @@ export default createRouter({
     { path: '/games', component: GamesView },
     { path: '/play', component: PlayView },
     { path: '/players', component: PlayersView },
-    { path: '/setup', component: SetupView },
-    { path: '/calibration', component: CalibrationView },
-    { path: '/detection', component: DetectionView },
     { path: '/leds', component: LedsView },
     { path: '/updates', component: UpdatesView },
     { path: '/join', component: JoinView, meta: { phone: true } },

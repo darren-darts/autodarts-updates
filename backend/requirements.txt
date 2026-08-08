@@ -1,9 +1,9 @@
 fastapi>=0.111
 uvicorn[standard]>=0.30
-opencv-python>=4.9
-numpy>=1.26
-pygrabber>=0.2 ; sys_platform == "win32"
 pyserial>=3.5
-httpx>=0.27
+httpx>=0.27  # polls the Autodarts Board Manager (:3180) for detected darts
 python-multipart>=0.0.9
 cryptography>=42  # only used by tools/generate_dev_cert.py (self-signed HTTPS for phone camera access)
+# opencv-python, numpy and pygrabber were removed with the old camera-based
+# detection stack - Autodarts now owns all camera work, so InterDarts no longer
+# does any image processing or camera capture of its own.

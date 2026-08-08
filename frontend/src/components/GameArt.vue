@@ -159,6 +159,69 @@ defineProps({
       <text x="160" y="172" class="art-sub" fill="#7fbf5a">18 HOLES &#183; LOWEST WINS</text>
     </g>
 
+    <!-- Mr vs Mrs: a house divided, blue one side and pink the other -->
+    <g v-else-if="art === 'chores'">
+      <defs>
+        <linearGradient id="g-chores" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%" stop-color="#0b2a4a" /><stop offset="50%" stop-color="#0a1024" /><stop offset="100%" stop-color="#3d0f2c" />
+        </linearGradient>
+      </defs>
+      <rect width="320" height="180" fill="url(#g-chores)" />
+      <circle cx="42" cy="42" r="58" fill="#38bdf8" opacity="0.16" />
+      <circle cx="280" cy="44" r="58" fill="#ff3d8b" opacity="0.16" />
+      <!-- the chore library itself, which is the whole point of the game -->
+      <g class="art-chore-row">
+        <text x="52" y="52" class="art-emoji">&#129530;</text>
+        <text x="104" y="44" class="art-emoji">&#127869;</text>
+        <text x="212" y="44" class="art-emoji">&#128054;</text>
+        <text x="262" y="52" class="art-emoji">&#128722;</text>
+      </g>
+      <!-- board in the middle, because it is still darts that decides it -->
+      <g transform="translate(160,96)">
+        <circle r="34" fill="#10182c" stroke="#f2f7ff" stroke-width="2" opacity="0.9" />
+        <circle r="22" fill="none" stroke="#38bdf8" stroke-width="4" opacity="0.85" />
+        <circle r="11" fill="none" stroke="#ff3d8b" stroke-width="4" opacity="0.85" />
+        <circle r="4" fill="#ffd12e" />
+        <line x1="-46" y1="-30" x2="-6" y2="-4" stroke="#dbe9ff" stroke-width="3" stroke-linecap="round" />
+        <polygon points="-52,-38 -38,-30 -50,-24" fill="#38bdf8" />
+      </g>
+      <text x="88" y="150" class="art-sub" fill="#38bdf8">MR</text>
+      <text x="160" y="150" class="art-sub" fill="#f2f7ff">VS</text>
+      <text x="232" y="150" class="art-sub" fill="#ff3d8b">MRS</text>
+      <text x="160" y="170" class="art-sub" fill="#94a9c9">LOSER DOES THE CHORE</text>
+    </g>
+
+    <!-- Snakes & Ladders: a board corner with a ladder climbing and a snake coiling -->
+    <g v-else-if="art === 'snakes'">
+      <defs>
+        <linearGradient id="g-snakes" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0%" stop-color="#14304f" /><stop offset="100%" stop-color="#0a1526" />
+        </linearGradient>
+      </defs>
+      <rect width="320" height="180" fill="url(#g-snakes)" />
+      <!-- a scrap of board grid -->
+      <g opacity="0.5" stroke="#c9a86a" stroke-width="1.5">
+        <rect x="26" y="30" width="120" height="120" fill="#e9d3a4" opacity="0.28" />
+        <path d="M26 70 H146 M26 110 H146 M66 30 V150 M106 30 V150" fill="none" />
+      </g>
+      <!-- ladder climbing up-right -->
+      <g stroke="#4f9bff" stroke-width="4" stroke-linecap="round">
+        <line x1="176" y1="150" x2="236" y2="42" />
+        <line x1="196" y1="150" x2="256" y2="42" />
+        <line x1="184" y1="132" x2="207" y2="132" stroke-width="3" stroke="#8fc3ff" />
+        <line x1="196" y1="106" x2="219" y2="106" stroke-width="3" stroke="#8fc3ff" />
+        <line x1="208" y1="80" x2="231" y2="80" stroke-width="3" stroke="#8fc3ff" />
+        <line x1="220" y1="56" x2="243" y2="56" stroke-width="3" stroke="#8fc3ff" />
+      </g>
+      <!-- snake coiling down -->
+      <path d="M262 40 C300 60, 250 96, 288 120 C312 136, 268 150, 250 150"
+            fill="none" stroke="#e0554f" stroke-width="9" stroke-linecap="round" />
+      <circle cx="262" cy="40" r="7" fill="#e0554f" />
+      <circle cx="259" cy="38" r="1.6" fill="#0b0f16" /><circle cx="265" cy="38" r="1.6" fill="#0b0f16" />
+      <text x="86" y="98" class="art-big" fill="#f6f2e2" style="font-size:44px">100</text>
+      <text x="160" y="170" class="art-sub" fill="#8fc3ff">UP LADDERS · DOWN SNAKES</text>
+    </g>
+
     <!-- Noughts & Crosses: a neon grid mid-game, X about to win the diagonal -->
     <g v-else-if="art === 'tictactoe'">
       <rect width="320" height="180" fill="#0a0f1e" />
@@ -216,6 +279,14 @@ defineProps({
   font: 600 13px ui-monospace, monospace;
   text-anchor: middle;
   letter-spacing: 3px;
+}
+
+/* Chore icons on the Mr vs Mrs card. Emoji glyphs rather than drawn shapes:
+   they are the same icons the chore card itself falls back to, so the library
+   art and the game agree even before any artwork is sliced. */
+.art-emoji {
+  font-size: 26px;
+  text-anchor: middle;
 }
 
 /* The hole number on the golf pennant - too small a space for art-sub's

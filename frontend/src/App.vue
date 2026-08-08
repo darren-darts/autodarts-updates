@@ -1,9 +1,14 @@
 <script setup>
-import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 const route = useRoute()
 const router = useRouter()
+
+// Camera setup and calibration are Autodarts' job now, not ours. This links out
+// to the Autodarts Board Manager on the same host (its default port is 3180)
+// for camera configuration, rather than InterDarts reimplementing any of it.
+const boardManagerUrl = computed(() => `http://${window.location.hostname}:3180`)
 
 // A dot on the Updates tab when something is waiting. The update itself is
 // always a deliberate choice, so this is the only unprompted mention of it -
@@ -66,10 +71,8 @@ onBeforeUnmount(() => ws?.close())
       <nav>
         <router-link to="/games">Games</router-link>
         <router-link to="/players">Players</router-link>
-        <router-link to="/setup">Setup</router-link>
-        <router-link to="/calibration">Calibration</router-link>
-        <router-link to="/detection">Detection</router-link>
         <router-link to="/leds">LEDs</router-link>
+        <a :href="boardManagerUrl" target="_blank" rel="noopener">Dart cameras</a>
         <router-link to="/updates" class="update-link">
           Updates
           <span v-if="updateReady" class="badge" :title="updateReady" />

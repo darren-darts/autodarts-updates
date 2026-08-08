@@ -10,9 +10,9 @@ from paths import CONFIG_DIR
 SETTINGS_PATH = CONFIG_DIR / "settings.json"
 
 DEFAULTS: dict = {
-    # Three camera slots; each is null or {"device_id": int, "name": str}
-    "cameras": {"slots": [None, None, None]},
-    "capture": {"width": 1280, "height": 720, "fps": 30},
+    # Camera selection and capture settings used to live here; cameras are now
+    # Autodarts' responsibility, so those keys are gone. Any left in an existing
+    # settings.json are simply ignored by _merge_defaults.
     "leds": {
         # transport: auto (prefer USB serial, fall back to WiFi), serial, http, off
         "transport": "auto",

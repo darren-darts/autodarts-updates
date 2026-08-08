@@ -38,13 +38,7 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  getCameras: () => request('/api/cameras'),
   getSettings: () => request('/api/settings'),
-  saveCameraSlots: (slots) =>
-    request('/api/settings/cameras', {
-      method: 'PUT',
-      body: JSON.stringify({ slots }),
-    }),
   getLedStatus: () => request('/api/leds/status'),
   getLedPorts: () => request('/api/leds/ports'),
   getLedEffects: () => request('/api/leds/effects'),
@@ -81,28 +75,12 @@ export const api = {
     return res.json()
   },
 
-  getAllCalibrations: () => request('/api/calibration'),
-  getCalibration: (id) => request(`/api/calibration/${id}`),
-  autoCalibrate: (id) => request(`/api/calibration/${id}/auto`, { method: 'POST' }),
-  fineTuneCalibration: (id) => request(`/api/calibration/${id}/fine-tune`, { method: 'POST' }),
-  saveCalibrationPoints: (id, points) =>
-    request(`/api/calibration/${id}/points`, { method: 'PUT', body: JSON.stringify({ points }) }),
-  clearCalibration: (id) => request(`/api/calibration/${id}`, { method: 'DELETE' }),
+  // Detection is Autodarts now: this is its health, consumed by the play
+  // screen's status chip. All the old camera-CV detection/calibration/correction
+  // endpoints are gone - Autodarts owns detection and its own calibration UI.
+  getAutodartsStatus: () => request('/api/detection/autodarts'),
+  resetBoard: () => request('/api/detection/autodarts/reset', { method: 'POST' }),
 
-  startDetection: () => request('/api/detection/start', { method: 'POST' }),
-  stopDetection: () => request('/api/detection/stop', { method: 'POST' }),
-  getDetectionStatus: () => request('/api/detection/status'),
-  correctDetection: (eventId, cameraId, xPx, yPx) =>
-    request(`/api/detection/history/${eventId}/correct`, {
-      method: 'POST',
-      body: JSON.stringify({ camera_id: cameraId, x_px: xPx, y_px: yPx }),
-    }),
-  correctDetectionOnBoard: (eventId, xMm, yMm) =>
-    request(`/api/detection/history/${eventId}/correct`, {
-      method: 'POST',
-      body: JSON.stringify({ x_mm: xMm, y_mm: yMm }),
-    }),
-  analyzeDetection: () => request('/api/detection/analyze'),
   getGameCatalogue: () => request('/api/games/catalogue'),
   getGameState: () => request('/api/games/state'),
   startGame: (slug, difficulty, playerIds, options = null) =>
@@ -133,7 +111,6 @@ export const api = {
   saveUpdateSettings: (settings) =>
     request('/api/update/settings', { method: 'POST', body: JSON.stringify(settings) }),
 
+  // Static board geometry for drawing the live board diagram (DartboardFace).
   getBoardGeometry: () => request('/api/detection/board-geometry'),
-  projectBoardPoint: (xMm, yMm) =>
-    request('/api/detection/project', { method: 'POST', body: JSON.stringify({ x_mm: xMm, y_mm: yMm }) }),
 }

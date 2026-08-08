@@ -19,7 +19,13 @@ const overrideTarget = ref('MISS')
 
 const game = computed(() => props.state.game ?? {})
 const players = computed(() => props.state.players ?? [])
-const current = computed(() => players.value.find((p) => p.player_id === props.state.current_player_id))
+// Usually the engine's current player. Mr vs Mrs plays one dart each within a
+// single turn, so there the game reports who is actually at the oche and that
+// wins - otherwise the phone would name the wrong person for the second dart.
+const current = computed(() => {
+  const throwing = players.value.find((p) => p.player_id === game.value.throwing_player_id)
+  return throwing ?? players.value.find((p) => p.player_id === props.state.current_player_id)
+})
 const darts = computed(() => props.state.darts_this_turn ?? [])
 const perTurn = computed(() => props.state.darts_per_turn ?? 3)
 const dartNumber = computed(() => Math.min(perTurn.value, darts.value.length + 1))
@@ -32,6 +38,8 @@ const scoreLabel = computed(() => {
   if (game.value.kind === 'invaders') return 'POINTS'
   if (game.value.kind === 'golf') return 'STROKES'
   if (game.value.kind === 'oxo') return 'SQUARES'
+  if (game.value.kind === 'chores') return 'ROUNDS WON'
+  if (game.value.kind === 'snakes') return 'SQUARE'
   return 'SCORE'
 })
 
@@ -101,6 +109,25 @@ async function applyOverride() {
     busy.value = false
   }
 }
+
+// Reset Autodarts' board detection - the same "Manual reset" its Board Manager
+// fires. Clears the darts the cameras currently see so a mis-detected visit can
+// be thrown again. This resets the *board*, not the scoreboard - use Undo for a
+// dart already scored here. Its own busy flag because it returns a board result,
+// not new game state, so nothing needs re-emitting.
+const resetting = ref(false)
+async function resetBoard() {
+  if (resetting.value) return
+  resetting.value = true
+  error.value = null
+  try {
+    await api.resetBoard()
+  } catch (err) {
+    error.value = err.message
+  } finally {
+    resetting.value = false
+  }
+}
 </script>
 
 <template>
@@ -154,7 +181,18 @@ async function applyOverride() {
 
     <p v-if="error" class="status error">{{ error }}</p>
 
-    <!-- the four actions -->
+    <!-- primary action: the button pressed every single turn -->
+    <button
+      class="act next primary-next"
+      :class="{ urgent: state.awaiting_takeout }"
+      :disabled="busy || finished"
+      @click="nextPlayer"
+    >
+      <span class="act-title">{{ state.awaiting_takeout ? 'Darts removed' : 'Next player' }}</span>
+      <span class="act-sub">{{ state.awaiting_takeout ? 'Confirm the board is clear' : 'Advance the turn' }}</span>
+    </button>
+
+    <!-- corrections, grouped together -->
     <div class="action-grid">
       <button class="act override" :disabled="busy" @click="openOverride">
         <span class="act-title">Override / miss</span>
@@ -168,15 +206,17 @@ async function applyOverride() {
         <span class="act-title">Undo dart</span>
         <span class="act-sub">{{ darts.length }} of {{ perTurn }} thrown</span>
       </button>
-      <button class="act next" :class="{ urgent: state.awaiting_takeout }" :disabled="busy || finished" @click="nextPlayer">
-        <span class="act-title">{{ state.awaiting_takeout ? 'Darts removed' : 'Next player' }}</span>
-        <span class="act-sub">{{ state.awaiting_takeout ? 'Confirm the board is clear' : 'Advance the turn' }}</span>
-      </button>
       <button class="act back" :disabled="busy" @click="previousPlayer">
         <span class="act-title">Previous player</span>
         <span class="act-sub">Undo a turn change</span>
       </button>
     </div>
+
+    <!-- board utility: clears the cameras, not the scoreboard -->
+    <button class="reset-board" :disabled="resetting" @click="resetBoard">
+      <span class="act-title">{{ resetting ? 'Resetting…' : 'Reset board' }}</span>
+      <span class="act-sub">Clear what the cameras see to re-throw a visit</span>
+    </button>
 
     <!-- scoreboard -->
     <section class="card">
@@ -393,10 +433,48 @@ async function applyOverride() {
 }
 
 .act.back {
-  grid-column: 1 / -1;
-  min-height: 58px;
   border-color: rgba(255, 191, 77, 0.5);
   background: rgba(255, 191, 77, 0.1);
+}
+
+/* The one action pressed every turn: full width, centred, hard to miss. */
+.primary-next {
+  min-height: 66px;
+  align-items: center;
+  text-align: center;
+}
+
+.primary-next .act-title {
+  font-size: 1.1rem;
+}
+
+/* Board reset is a hardware utility, not a scoring action - dashed and muted
+   so it reads apart from the coloured turn buttons above. */
+.reset-board {
+  min-height: 54px;
+  padding: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.15rem;
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+  background: var(--panel-2);
+  color: var(--muted);
+  font: inherit;
+  text-align: center;
+  cursor: pointer;
+}
+
+.reset-board:disabled {
+  opacity: 0.5;
+}
+
+.reset-board .act-title {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 700;
 }
 
 .fix-toggle {

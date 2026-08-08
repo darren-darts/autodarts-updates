@@ -8,6 +8,9 @@ import SpaceStage from '../components/SpaceStage.vue'
 import BoardPicker from '../components/BoardPicker.vue'
 import TakeoutPrompt from '../components/TakeoutPrompt.vue'
 import GolfScorecard from '../components/GolfScorecard.vue'
+import DerbyRace from '../components/DerbyRace.vue'
+import ChoreArena from '../components/ChoreArena.vue'
+import SnakesBoard from '../components/SnakesBoard.vue'
 
 const router = useRouter()
 const state = ref({ active: false })
@@ -51,6 +54,46 @@ const ranked = computed(() => [...players.value].sort((a, b) => (a.place ?? 99) 
 const darts = computed(() => state.value.darts_this_turn ?? [])
 const dartNumber = computed(() => Math.min(state.value.darts_per_turn ?? 3, darts.value.length + 1))
 
+const derbyPlayers = computed(() => players.value.map((player) => ({
+  ...player,
+  avatar: avatarFor(player),
+})))
+const derbyNumber = (playerId) => game.value.numbers?.[playerId] ?? '—'
+
+// Mr vs Mrs plays one dart each inside a single engine turn, so the player who
+// is actually at the oche is not always the engine's current player - the game
+// reports it. See backend/games/chores.py for why a round is one turn.
+const chorePlayers = computed(() => players.value.map((player) => ({
+  ...player,
+  avatar: avatarFor(player),
+})))
+const choreThrower = computed(
+  () => players.value.find((p) => p.player_id === game.value.throwing_player_id) ?? current.value,
+)
+
+function derbyDartEffect(dart) {
+  const match = /^([SDT])(\d+)$/.exec(dart?.label ?? '')
+  if (!match) return 'NO MOVEMENT'
+  const steps = { S: 1, D: 2, T: 3 }[match[1]]
+  const number = Number(match[2])
+  if (number === derbyNumber(current.value?.player_id)) return `+${steps} FORWARD`
+  const rival = players.value.find((player) => derbyNumber(player.player_id) === number)
+  return rival ? `-${steps} ${rival.name.toUpperCase()}` : 'NO MOVEMENT'
+}
+
+// Snakes & Ladders: tokens carry the player's accent so the board and the
+// console name the same colour, and the running move is the summed, capped
+// total of the darts thrown so far this visit.
+const snakePlayers = computed(() => players.value.map((player, index) => ({
+  ...player,
+  avatar: avatarFor(player),
+  accent: accent(index),
+})))
+const snakeSquare = (playerId) => game.value.positions?.[playerId] ?? 0
+// One dart at a time: a dart's score becomes ceil(score / divisor) squares.
+// Mirrors backend/games/snakes.py movement_for so the console and the move agree.
+const snakeDartMove = (dart) => Math.ceil((dart?.score || 0) / (game.value.divisor || 5))
+
 // Templates call .toUpperCase() on this, so it must always be a string.
 // Golf is the only game here where LOW wins, so the leader is the minimum and
 // "to par" counts against 3 strokes per hole actually played, not against the
@@ -91,20 +134,24 @@ const difficultyName = computed(
 const title = computed(() => {
   if (kind.value === 'killer') return `Killer · ${difficultyName.value} hunt`
   if (kind.value === 'invaders') return `Space Invaders · ${difficultyName.value}`
+  if (kind.value === 'derby') return `Donkey Derby · ${difficultyName.value} · ${game.value.track ?? 12} furlongs`
+  if (kind.value === 'snakes') return `Snakes & Ladders · first to ${game.value.finish ?? 100}`
   if (kind.value === 'x01') return 'Classic darts · X01'
   return state.value.name || 'Now playing'
 })
 
 // ---------------------------------------------------------------- detector chip
+// Detection is now Autodarts (it owns the cameras, calibration and dart
+// localisation); this chip reflects its health from /api/detection/autodarts.
+// The four states map to the one thing the player needs to know - will a
+// thrown dart score right now, and if not, what to fix.
 const scan = computed(() => {
   const d = detection.value
-  if (!d || !d.active) return { label: 'CAMERAS OFF', detail: 'Darts will not score automatically — use Override / miss', tone: 'bad' }
-  const dead = Object.entries(d.camera_health || {}).filter(([, h]) => !h.delivering).map(([id]) => id)
-  if (dead.length) return { label: 'CAMERA FAULT', detail: `Camera ${dead.join(', ')} is not sending frames`, tone: 'warn' }
-  if (d.state === 'clearing') return { label: 'BOARD CLEARING', detail: 'Darts coming out · waiting for the board to settle', tone: 'working' }
-  if (d.state === 'learning_baseline') return { label: 'LEARNING BOARD', detail: 'Building a clean reference frame — throw in a moment', tone: 'working' }
-  if (d.state === 'settling') return { label: 'ANALYSING', detail: 'Impact seen · measuring the dart', tone: 'working' }
-  return { label: 'SCANNING', detail: 'Board stable · watching every camera', tone: 'good' }
+  if (!d) return { label: 'CONNECTING…', detail: 'Contacting the Autodarts detector', tone: 'working' }
+  if (!d.available) return { label: 'AUTODARTS OFFLINE', detail: 'Detection service unreachable — start Autodarts, then check the Board Manager', tone: 'bad' }
+  if (!d.connected) return { label: 'CAMERAS OFFLINE', detail: 'Autodarts is up but its cameras aren’t connected — open the Board Manager (:3180)', tone: 'bad' }
+  if (!d.running) return { label: 'BOARD IDLE', detail: 'Start a game in Autodarts (lobby) so it begins detecting throws', tone: 'warn' }
+  return { label: 'SCANNING', detail: 'Autodarts live · darts score automatically', tone: 'good' }
 })
 
 // ---------------------------------------------------------------- killer helpers
@@ -138,7 +185,7 @@ const invKills = (pid) => game.value.kills?.[pid] ?? 0
 // ---------------------------------------------------------------- actions
 async function refresh() {
   try { state.value = await api.getGameState() } catch { /* transient */ }
-  try { detection.value = await api.getDetectionStatus() } catch { /* transient */ }
+  try { detection.value = await api.getAutodartsStatus() } catch { /* transient */ }
 }
 
 function connect() {
@@ -201,6 +248,24 @@ const dartsRemoved = () =>
 // back rather than a fresh turn.
 const previousPlayer = () => act(api.previousTurn)
 const recordMiss = () => { unlockAudio(); return act(() => api.sendManualDart(null, 0)) }
+
+// Reset Autodarts' board detection - the same "Manual reset" its Board Manager
+// fires. Clears the darts the cameras currently see so a mis-detected visit can
+// be thrown again. This resets the *board*, not the InterDarts scoreboard; use
+// Undo for a dart that was already scored here. Its own busy flag (not the
+// shared `act`) because it returns a board result, not new game state.
+const resetting = ref(false)
+async function resetBoard() {
+  if (resetting.value) return
+  resetting.value = true
+  try {
+    await api.resetBoard()
+  } catch (e) {
+    console.warn('Autodarts board reset failed', e)
+  } finally {
+    resetting.value = false
+  }
+}
 
 async function quit() {
   await api.stopGame()
@@ -303,6 +368,8 @@ const winnerLabel = computed(() => {
     return 'SPACE INVADERS · FLEET CLEARED'
   }
   if (kind.value === 'killer') return 'LAST PLAYER ALIVE'
+  if (kind.value === 'derby') return 'DONKEY DERBY · FIRST PAST THE POST'
+  if (kind.value === 'snakes') return 'SNAKES & LADDERS · FIRST TO 100'
   if (kind.value === 'x01') return 'X01 CHAMPION'
   return (state.value.name || 'GAME').toUpperCase() + ' CHAMPION'
 })
@@ -345,6 +412,12 @@ onBeforeUnmount(() => {
           <div><strong>{{ scan.label }}</strong><span>{{ scan.detail }}</span></div>
         </div>
         <div class="arena-buttons">
+          <button
+            class="abtn secondary"
+            :disabled="resetting"
+            title="Clear what the cameras currently see, to re-throw a mis-detected visit (same as Autodarts' Manual reset)"
+            @click="resetBoard"
+          >{{ resetting ? 'Resetting…' : 'Reset board' }}</button>
           <button class="abtn secondary" @click="toggleFullscreen">{{ isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen' }}</button>
           <button class="abtn secondary" @click="router.push('/games')">Change game</button>
           <button class="abtn secondary" @click="quit">End game</button>
@@ -831,16 +904,260 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- ======================================================= DONKEY DERBY -->
+    <div v-else-if="kind === 'derby'" class="game-panel mode-derby">
+      <div class="derby-live-layout">
+        <DerbyRace
+          :players="derbyPlayers"
+          :numbers="game.numbers || {}"
+          :track="game.track || 12"
+          :current-player-id="state.current_player_id"
+          :winner-id="state.winner_id"
+          :round="state.round || 1"
+        />
+
+        <aside class="derby-console">
+          <div class="derby-console-title">
+            <span>PADDOCK CONTROL</span>
+            <b :class="{ live: !state.finished }">{{ state.finished ? 'RESULT' : 'RACE LIVE' }}</b>
+          </div>
+
+          <section class="derby-current">
+            <span class="derby-up-now">UP NOW</span>
+            <div class="derby-rider">
+              <img :src="avatarFor(current)" alt="" />
+              <div><small>JOCKEY</small><strong>{{ current?.name }}</strong></div>
+            </div>
+            <div class="derby-aim">
+              <div><small>YOUR NUMBER</small><strong>{{ derbyNumber(current?.player_id) }}</strong></div>
+              <p>Hit it to race <b>forward</b></p>
+            </div>
+            <div class="derby-objective">Or hit a rival's number to knock their donkey backwards.</div>
+          </section>
+
+          <section class="derby-stable">
+            <div class="derby-section-head"><span>THE FIELD</span><small>TARGET NUMBERS</small></div>
+            <div class="derby-target-grid">
+              <article
+                v-for="(player, index) in players"
+                :key="player.player_id"
+                :class="{ current: player.player_id === state.current_player_id, winner: player.player_id === state.winner_id }"
+                :style="{ '--player-accent': accent(index) }"
+              >
+                <img :src="avatarFor(player)" alt="" />
+                <div><strong>{{ player.name }}</strong><small>{{ player.score }}/{{ game.track }}</small></div>
+                <b>{{ derbyNumber(player.player_id) }}</b>
+              </article>
+            </div>
+          </section>
+
+          <section class="derby-visit">
+            <div class="derby-section-head">
+              <span>THIS VISIT</span>
+              <small>DART {{ dartNumber }} OF {{ state.darts_per_turn }}</small>
+            </div>
+            <div class="derby-darts">
+              <div v-for="i in state.darts_per_turn" :key="i" :class="{ scored: darts[i - 1] }">
+                <strong>{{ darts[i - 1]?.label ?? `D${i}` }}</strong>
+                <span>{{ darts[i - 1] ? derbyDartEffect(darts[i - 1]) : 'READY' }}</span>
+              </div>
+            </div>
+          </section>
+
+          <div class="derby-message">{{ state.message || state.target_hint || 'The runners are under starter’s orders…' }}</div>
+
+          <div class="derby-actions action-grid">
+            <button class="abtn miss-button" :disabled="busy" @click="openOverride">Override / miss</button>
+            <button class="abtn complete-miss-button" :disabled="busy || state.finished" @click="recordMiss">Complete miss</button>
+            <button class="abtn secondary" :disabled="busy || !darts.length" @click="undo">Undo dart</button>
+            <button class="abtn secondary" :disabled="busy" @click="previousPlayer">Previous player</button>
+            <button class="abtn takeout" :disabled="busy || state.finished" @click="dartsRemoved">{{ state.awaiting_takeout ? 'Darts removed' : 'Next jockey' }}</button>
+            <button class="round-menu" aria-label="Game help" @click="helpOpen = true">Race help</button>
+          </div>
+        </aside>
+
+        <TakeoutPrompt
+          :state="state"
+          :busy="busy"
+          :next-player-name="nextPlayerName"
+          @confirm="dartsRemoved"
+          @undo="undo"
+          @miss="recordMiss"
+          @previous="previousPlayer"
+          @override="openOverride"
+        />
+      </div>
+    </div>
+
+    <!-- ======================================================= MR vs MRS -->
+    <div v-else-if="kind === 'chores'" class="game-panel mode-chores">
+      <div class="chore-live-layout">
+        <ChoreArena
+          :players="chorePlayers"
+          :game="game"
+          :darts="darts"
+          :geometry="geometry"
+          :highlight="state.highlight || []"
+          :finished="Boolean(state.finished)"
+          :winner-id="state.winner_id"
+          :message="state.message"
+        />
+
+        <aside class="chore-console">
+          <div class="chore-console-title">
+            <span>CHORE CHALLENGE</span>
+            <b :class="{ live: !state.finished }">{{ state.finished ? 'RESULT' : `ROUND ${game.chore_round} / ${game.rounds}` }}</b>
+          </div>
+
+          <section class="chore-up-now">
+            <span class="chore-eyebrow">{{ state.finished ? 'FINAL SCORE' : 'THROWING NOW' }}</span>
+            <div class="chore-rider">
+              <img :src="avatarFor(choreThrower)" alt="" />
+              <div>
+                <small>ONE DART EACH</small>
+                <strong>{{ state.finished ? 'Game over' : choreThrower?.name }}</strong>
+              </div>
+            </div>
+            <p class="chore-objective">{{ state.target_hint || 'Highest score wins the round and avoids the chore.' }}</p>
+          </section>
+
+          <section class="chore-visit">
+            <div class="chore-section-head">
+              <span>THIS ROUND</span>
+              <small>DART {{ dartNumber }} OF {{ state.darts_per_turn }}</small>
+            </div>
+            <div class="chore-darts">
+              <div v-for="i in state.darts_per_turn" :key="i" :class="{ scored: darts[i - 1] }">
+                <strong>{{ darts[i - 1]?.label ?? `D${i}` }}</strong>
+                <span>{{ darts[i - 1] ? `${darts[i - 1].score} pts` : 'READY' }}</span>
+              </div>
+            </div>
+          </section>
+
+          <div class="chore-actions action-grid">
+            <button class="abtn miss-button" :disabled="busy" @click="openOverride">Override / miss</button>
+            <button class="abtn complete-miss-button" :disabled="busy || state.finished" @click="recordMiss">Complete miss</button>
+            <button class="abtn secondary" :disabled="busy || !darts.length" @click="undo">Undo dart</button>
+            <button class="abtn secondary" :disabled="busy" @click="previousPlayer">Previous round</button>
+            <button class="abtn takeout" :disabled="busy || state.finished" @click="dartsRemoved">{{ state.awaiting_takeout ? 'Darts removed' : 'Next round' }}</button>
+            <button class="round-menu" aria-label="Game help" @click="helpOpen = true">Chore help</button>
+          </div>
+        </aside>
+
+        <TakeoutPrompt
+          :state="state"
+          :busy="busy"
+          :next-player-name="nextPlayerName"
+          @confirm="dartsRemoved"
+          @undo="undo"
+          @miss="recordMiss"
+          @previous="previousPlayer"
+          @override="openOverride"
+        />
+      </div>
+    </div>
+
+    <!-- ======================================================= SNAKES & LADDERS -->
+    <div v-else-if="kind === 'snakes'" class="game-panel mode-snakes">
+      <div class="snl-live-layout">
+        <div class="snl-stage">
+          <SnakesBoard
+            :players="snakePlayers"
+            :positions="game.positions || {}"
+            :ladders="game.ladders || {}"
+            :snakes="game.snakes || {}"
+            :finish="game.finish || 100"
+            :columns="game.columns || 10"
+            :current-player-id="state.current_player_id"
+            :winner-id="state.winner_id"
+            :last-move="game.last_move"
+            :dart-number="dartNumber"
+            :darts-per-turn="state.darts_per_turn"
+          />
+        </div>
+
+        <aside class="snl-console">
+          <div class="snl-console-title">
+            <span>BOARD CONTROL</span>
+            <b :class="{ live: !state.finished }">{{ state.finished ? 'RESULT' : 'RACE LIVE' }}</b>
+          </div>
+
+          <section class="snl-current">
+            <span class="snl-up-now">UP NOW</span>
+            <div class="snl-rider">
+              <img :src="avatarFor(current)" alt="" />
+              <div><small>ON SQUARE</small><strong>{{ snakeSquare(current?.player_id) }}</strong></div>
+            </div>
+            <div class="snl-aim">
+              <div><small>TO GO</small><strong>{{ (game.finish || 100) - snakeSquare(current?.player_id) }}</strong></div>
+              <p>Each dart moves you <b>⌈score ÷ {{ game.divisor || 5 }}⌉</b> squares. Land exactly on {{ game.finish || 100 }}.</p>
+            </div>
+            <div class="snl-objective">Every dart moves and reacts · ladders climb · snakes slide · overshoot and you stay put.</div>
+          </section>
+
+          <section class="snl-field">
+            <div class="snl-section-head"><span>THE FIELD</span><small>SQUARES</small></div>
+            <div class="snl-target-grid">
+              <article
+                v-for="(player, index) in players"
+                :key="player.player_id"
+                :class="{ current: player.player_id === state.current_player_id, winner: player.player_id === state.winner_id }"
+                :style="{ '--player-accent': accent(index) }"
+              >
+                <img :src="avatarFor(player)" alt="" />
+                <div><strong>{{ player.name }}</strong><small>{{ (game.finish || 100) - snakeSquare(player.player_id) }} to go</small></div>
+                <b>{{ snakeSquare(player.player_id) }}</b>
+              </article>
+            </div>
+          </section>
+
+          <section class="snl-visit">
+            <div class="snl-section-head">
+              <span>THIS VISIT</span>
+              <small>DART {{ dartNumber }} OF {{ state.darts_per_turn }}</small>
+            </div>
+            <div class="snl-darts">
+              <div v-for="i in state.darts_per_turn" :key="i" :class="{ scored: darts[i - 1] }">
+                <strong>{{ darts[i - 1]?.label ?? `D${i}` }}</strong>
+                <span>{{ darts[i - 1] ? `MOVE ${snakeDartMove(darts[i - 1])}` : 'READY' }}</span>
+              </div>
+            </div>
+          </section>
+
+          <div class="snl-message">{{ state.message || state.target_hint || 'Throw three darts to move your token.' }}</div>
+
+          <div class="snl-actions action-grid">
+            <button class="abtn miss-button" :disabled="busy" @click="openOverride">Override / miss</button>
+            <button class="abtn complete-miss-button" :disabled="busy || state.finished" @click="recordMiss">Complete miss</button>
+            <button class="abtn secondary" :disabled="busy || !darts.length" @click="undo">Undo dart</button>
+            <button class="abtn secondary" :disabled="busy" @click="previousPlayer">Previous player</button>
+            <button class="abtn takeout" :disabled="busy || state.finished" @click="dartsRemoved">{{ state.awaiting_takeout ? 'Darts removed' : 'Next player' }}</button>
+            <button class="round-menu" aria-label="Game help" @click="helpOpen = true">Board help</button>
+          </div>
+        </aside>
+
+        <TakeoutPrompt
+          :state="state"
+          :busy="busy"
+          :next-player-name="nextPlayerName"
+          @confirm="dartsRemoved"
+          @undo="undo"
+          @miss="recordMiss"
+          @previous="previousPlayer"
+          @override="openOverride"
+        />
+      </div>
+    </div>
+
     <!-- ======================================================= X01 + everything else -->
     <div v-else class="game-panel mode-x01">
       <div class="arena-layout x01-layout">
         <article class="arena-panel x01-current">
           <span class="arena-ribbon">UP NOW</span>
           <div class="x01-score-block">
-            <small>{{ kind === 'x01' ? 'REMAINING' : kind === 'derby' ? 'STEPS HOME' : kind === 'clock' ? 'TARGET' : 'SCORE' }}</small>
+            <small>{{ kind === 'x01' ? 'REMAINING' : kind === 'clock' ? 'TARGET' : 'SCORE' }}</small>
             <strong>{{ kind === 'clock'
               ? (game.targets?.[current?.player_id] > 20 ? 'BULL' : game.targets?.[current?.player_id])
-              : kind === 'derby' ? `${current?.score}/${game.track}`
               : current?.score }}</strong>
           </div>
           <div class="x01-current-darts">
@@ -894,16 +1211,9 @@ onBeforeUnmount(() => {
               <div>
                 <small>{{ p.player_id === state.winner_id ? 'WINNER' : p.player_id === state.current_player_id ? 'UP NOW' : 'UP NEXT' }}</small>
                 <strong>{{ p.name }}</strong>
-                <!-- Donkey Derby is a race, so position along the track is the
-                     score that matters, not the raw step count. -->
-                <div v-if="kind === 'derby'" class="derby-track">
-                  <div class="derby-line"></div>
-                  <span class="derby-donkey" :style="{ left: `${(p.score / game.track) * 100}%` }">🐴</span>
-                </div>
               </div>
               <b>{{ kind === 'clock'
                 ? (game.targets?.[p.player_id] > 20 ? 'BULL' : game.targets?.[p.player_id])
-                : kind === 'derby' ? `${p.score}/${game.track}`
                 : p.score }}</b>
             </article>
           </div>
@@ -1012,10 +1322,33 @@ onBeforeUnmount(() => {
       <div class="dialog">
         <button class="dialog-close" @click="helpOpen = false">×</button>
         <p class="arena-eyebrow">IN-GAME MENU</p>
-        <h2>Missed dart or removing darts?</h2>
-        <p class="dialog-copy"><strong>Record complete miss</strong> immediately consumes one zero-score dart when the cameras detect nothing.</p>
-        <p class="dialog-copy"><strong>Override / miss</strong> replaces a detected result or adds a dart the cameras missed, via the virtual board.</p>
-        <p class="dialog-copy">After the third dart, remove all darts normally; the cameras advance automatically. If takeout is not recognised, press <strong>Darts removed</strong>.</p>
+        <template v-if="kind === 'derby'">
+          <h2>How Donkey Derby works</h2>
+          <p class="dialog-copy"><strong>Hit your assigned number</strong> to move your donkey towards the finish.</p>
+          <p class="dialog-copy"><strong>Hit a rival's assigned number</strong> to push that donkey backwards towards the start.</p>
+          <p class="dialog-copy">Singles move one step, doubles move two and trebles move three. Other numbers, bull and misses do not move any runner.</p>
+          <p class="dialog-copy">The first donkey to reach the finish post wins the race.</p>
+        </template>
+        <template v-else-if="kind === 'chores'">
+          <h2>How Mr vs Mrs works</h2>
+          <p class="dialog-copy">A chore appears and <strong>both players throw one dart</strong>. The highest score wins the round and avoids it; the other player gets it for the week.</p>
+          <p class="dialog-copy">Level scores are <strong>sudden death</strong> — both throw again for the same chore until someone wins it.</p>
+          <p class="dialog-copy">🔥 <strong>Double Trouble</strong> rounds make the loser do that chore twice. A <strong>Lucky Target</strong> lights up a number — hit it and you win a bonus to settle between yourselves. A <strong>Steal Round</strong> lets the winner move a chore around.</p>
+          <p class="dialog-copy">Both darts come out together at the end of the round. The player who loses the most rounds spins the <strong>Wheel of Misfortune</strong>, and the chore lists stay on screen at the end so you can photograph them.</p>
+        </template>
+        <template v-else-if="kind === 'snakes'">
+          <h2>How Snakes &amp; Ladders works</h2>
+          <p class="dialog-copy">Throw <strong>three darts</strong> — their combined score is how many squares your token moves (up to 60 a turn).</p>
+          <p class="dialog-copy">Land on the <strong>foot of a ladder</strong> and you climb to the top. Land on a <strong>snake's head</strong> and you slide down to its tail.</p>
+          <p class="dialog-copy">You must land <strong>exactly on 100</strong> — if your move would take you past it, you stay where you are and try again next turn.</p>
+          <p class="dialog-copy">First token to reach square 100 wins the race.</p>
+        </template>
+        <template v-else>
+          <h2>Missed dart or removing darts?</h2>
+          <p class="dialog-copy"><strong>Record complete miss</strong> immediately consumes one zero-score dart when the cameras detect nothing.</p>
+          <p class="dialog-copy"><strong>Override / miss</strong> replaces a detected result or adds a dart the cameras missed, via the virtual board.</p>
+          <p class="dialog-copy">After the third dart, remove all darts normally; the cameras advance automatically. If takeout is not recognised, press <strong>Darts removed</strong>.</p>
+        </template>
         <div class="dialog-footer"><button class="abtn" @click="helpOpen = false">Back to game</button></div>
       </div>
     </div>
@@ -1108,6 +1441,182 @@ body.fullscreen-game .page { max-width: none; height: 100vh; padding: 8px 14px; 
 .stage-board { width: min(98%, 74vh, 780px); }
 .stage-board .board-face { filter: drop-shadow(0 22px 26px rgba(0, 0, 0, 0.64)); }
 
+/* ------------------------------------------------ Donkey Derby */
+/* ------------------------------------------------------------ MR vs MRS */
+.chore-live-layout {
+  min-height: 650px;
+  padding: 10px;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(640px, 1fr) 272px;
+  gap: 10px;
+  background:
+    radial-gradient(circle at 20% 0%, rgba(56, 189, 248, 0.16), transparent 42%),
+    radial-gradient(circle at 82% 4%, rgba(255, 61, 139, 0.16), transparent 42%),
+    linear-gradient(150deg, #0d1730, #070c1a 60%, #150a22);
+}
+
+.chore-console { min-height: 0; padding: 12px; position: relative; overflow: auto; display: flex; flex-direction: column; gap: 10px; border: 1px solid rgba(120, 160, 220, 0.35); border-radius: 15px; background: linear-gradient(160deg, rgba(17, 27, 50, 0.97), rgba(9, 14, 28, 0.98)); box-shadow: 0 20px 46px rgba(0, 0, 0, 0.45); }
+.chore-console-title { min-height: 32px; padding-bottom: 8px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(120, 160, 220, 0.3); }
+.chore-console-title span { color: #cfe4ff; font-size: 10px; font-weight: 950; letter-spacing: 0.16em; }
+.chore-console-title b { padding: 5px 8px; border: 1px solid rgba(120, 160, 220, 0.5); border-radius: 99px; color: #cfe4ff; font-size: 7px; letter-spacing: 0.12em; }
+.chore-console-title b.live { border-color: #38d9f1; background: rgba(56, 217, 241, 0.14); color: #8ceafb; }
+
+.chore-up-now { padding: 10px; position: relative; border: 1px solid rgba(120, 160, 220, 0.32); border-radius: 11px; background: linear-gradient(125deg, rgba(56, 189, 248, 0.12), rgba(255, 61, 139, 0.1)); }
+.chore-eyebrow { padding: 4px 8px; position: absolute; top: 0; right: 0; border-radius: 0 9px 0 8px; background: #38d9f1; color: #061421; font-size: 7px; font-weight: 1000; letter-spacing: 0.13em; }
+.chore-rider { padding-right: 62px; display: flex; align-items: center; gap: 9px; }
+.chore-rider img { width: 45px; height: 45px; border: 3px solid #dbe9ff; border-radius: 50%; object-fit: cover; background: #1a2438; }
+.chore-rider > div { min-width: 0; display: flex; flex-direction: column; }
+.chore-rider small { color: #7f95bb; font-size: 7px; font-weight: 900; letter-spacing: 0.12em; }
+.chore-rider strong { overflow: hidden; font-size: 16px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.chore-objective { margin: 9px 0 0; color: #cbd8ef; font-size: 11px; line-height: 1.4; }
+
+.chore-section-head { display: flex; align-items: baseline; justify-content: space-between; }
+.chore-section-head span { color: #cfe4ff; font-size: 9px; font-weight: 950; letter-spacing: 0.14em; }
+.chore-section-head small { color: #7f95bb; font-size: 8px; font-weight: 800; }
+.chore-darts { margin-top: 6px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.chore-darts > div { padding: 7px 6px; display: flex; flex-direction: column; align-items: center; border: 1px dashed rgba(120, 160, 220, 0.4); border-radius: 9px; }
+.chore-darts > div.scored { border-style: solid; border-color: #38d9f1; background: rgba(56, 217, 241, 0.1); }
+.chore-darts strong { font-size: 15px; }
+.chore-darts span { color: #7f95bb; font-size: 8px; font-weight: 800; letter-spacing: 0.08em; }
+.chore-actions { margin-top: auto; }
+
+.derby-live-layout {
+  min-height: 650px;
+  padding: 10px;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(610px, 1fr) 292px;
+  gap: 10px;
+  background:
+    radial-gradient(circle at 25% 0%, rgba(255, 198, 77, 0.16), transparent 35%),
+    linear-gradient(135deg, #1b301c, #08160e 58%, #2a110c);
+}
+
+.derby-console {
+  min-height: 0;
+  padding: 12px;
+  position: relative;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 2px solid #e6c359;
+  border-radius: 15px;
+  background:
+    linear-gradient(145deg, rgba(72, 20, 15, 0.97), rgba(32, 12, 9, 0.98) 52%, rgba(18, 10, 8, 0.99));
+  box-shadow: inset 0 0 0 3px rgba(255, 228, 137, 0.08), 0 20px 46px rgba(0, 0, 0, 0.45);
+}
+
+.derby-console-title { min-height: 32px; padding-bottom: 8px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(255, 223, 118, 0.3); }
+.derby-console-title span { color: #ffe27a; font-size: 10px; font-weight: 950; letter-spacing: 0.16em; }
+.derby-console-title b { padding: 5px 8px; border: 1px solid #d6aa3d; border-radius: 99px; color: #ffe697; font-size: 7px; letter-spacing: 0.12em; }
+.derby-console-title b.live { border-color: #6fe887; background: rgba(64, 210, 93, 0.13); color: #9cf6ad; box-shadow: 0 0 12px rgba(81, 229, 108, 0.24); }
+
+.derby-current { padding: 10px; position: relative; border: 1px solid rgba(255, 223, 126, 0.36); border-radius: 11px; background: linear-gradient(125deg, rgba(150, 45, 24, 0.35), rgba(255, 187, 68, 0.08)); }
+.derby-up-now { padding: 4px 8px; position: absolute; top: 0; right: 0; border-radius: 0 9px 0 8px; background: #f1c84d; color: #3b1709; font-size: 7px; font-weight: 1000; letter-spacing: 0.13em; }
+.derby-rider { padding-right: 53px; display: flex; align-items: center; gap: 9px; }
+.derby-rider img { width: 45px; height: 45px; border: 3px solid #fff1bd; border-radius: 50%; object-fit: cover; background: #34241b; box-shadow: 0 0 0 2px #c4882b; }
+.derby-rider > div { min-width: 0; display: flex; flex-direction: column; }
+.derby-rider small { color: #d9ad62; font-size: 7px; font-weight: 900; letter-spacing: 0.12em; }
+.derby-rider strong { overflow: hidden; font-size: 16px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.derby-aim { margin-top: 9px; display: grid; grid-template-columns: 80px 1fr; align-items: center; gap: 9px; }
+.derby-aim > div { width: 74px; height: 74px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 4px double #5b3618; border-radius: 50%; background: radial-gradient(circle, #fff7d6, #e4bf68); color: #2a180c; box-shadow: 0 0 0 2px #f4d364, 0 8px 20px rgba(0, 0, 0, 0.35); }
+.derby-aim small { font-size: 6px; font-weight: 950; letter-spacing: 0.08em; }
+.derby-aim strong { font-size: 34px; line-height: 0.9; }
+.derby-aim p { margin: 0; color: #f3dcc1; font-size: 12px; line-height: 1.35; }
+.derby-aim p b { color: #86ed91; }
+.derby-objective { margin-top: 8px; padding: 7px 9px; border-left: 3px solid #ff6f61; background: rgba(255, 100, 76, 0.09); color: #ffd7c8; font-size: 9px; line-height: 1.4; }
+
+.derby-stable, .derby-visit { padding: 9px; border: 1px solid rgba(255, 225, 140, 0.22); border-radius: 10px; background: rgba(12, 9, 7, 0.36); }
+.derby-section-head { margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; }
+.derby-section-head span { color: #f4d35e; font-size: 8px; font-weight: 950; letter-spacing: 0.14em; }
+.derby-section-head small { color: #aa9781; font-size: 6px; font-weight: 900; letter-spacing: 0.1em; }
+.derby-target-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.derby-target-grid article { min-width: 0; min-height: 40px; padding: 4px 5px; display: grid; grid-template-columns: 27px minmax(0, 1fr) 28px; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--player-accent) 36%, transparent); border-left: 3px solid var(--player-accent); border-radius: 6px; background: rgba(255, 255, 255, 0.04); }
+.derby-target-grid article.current { background: color-mix(in srgb, var(--player-accent) 18%, rgba(30, 13, 8, 0.94)); box-shadow: inset 0 0 0 1px var(--player-accent); }
+.derby-target-grid article.winner { border-color: #ffdf59; background: rgba(255, 211, 65, 0.16); }
+.derby-target-grid img { width: 27px; height: 27px; border: 1px solid #fff; border-radius: 50%; object-fit: cover; }
+.derby-target-grid article > div { min-width: 0; display: flex; flex-direction: column; }
+.derby-target-grid strong { overflow: hidden; font-size: 8px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.derby-target-grid small { color: #baa995; font-size: 7px; }
+.derby-target-grid article > b { width: 27px; height: 27px; display: grid; place-items: center; border: 2px solid var(--player-accent); border-radius: 50%; background: #f8e9c5; color: #27180e; font-size: 12px; }
+
+.derby-darts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.derby-darts > div { min-width: 0; min-height: 50px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed rgba(255, 232, 168, 0.25); border-radius: 7px; color: #786c5d; }
+.derby-darts > div.scored { border-style: solid; border-color: rgba(244, 211, 94, 0.5); background: rgba(244, 211, 94, 0.08); color: #ffe788; }
+.derby-darts strong { font-size: 14px; }
+.derby-darts span { width: 100%; overflow: hidden; color: #ad9c87; font-size: 6px; font-weight: 900; letter-spacing: 0.04em; text-align: center; text-overflow: ellipsis; white-space: nowrap; }
+
+.derby-message { min-height: 38px; padding: 8px 10px; display: grid; place-items: center; border: 1px solid rgba(249, 207, 80, 0.3); border-radius: 8px; background: linear-gradient(90deg, rgba(125, 39, 21, 0.35), rgba(224, 146, 34, 0.13)); color: #ffe8a5; font-size: 10px; font-weight: 800; line-height: 1.35; text-align: center; }
+.derby-actions { margin-top: auto; }
+.derby-actions.action-grid .abtn { min-height: 35px; font-size: 9px; }
+.derby-actions.action-grid .abtn.takeout { min-height: 40px; }
+.derby-actions .round-menu { min-height: 28px; border-color: rgba(244, 211, 94, 0.4); background: rgba(171, 95, 24, 0.18); color: #ffe277; font-size: 9px; }
+
+/* ------------------------------------------------------------ SNAKES & LADDERS */
+.snl-live-layout {
+  min-height: 650px;
+  padding: 10px;
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(540px, 1fr) 300px;
+  gap: 10px;
+  background:
+    radial-gradient(circle at 24% 0%, rgba(90, 169, 255, 0.16), transparent 42%),
+    radial-gradient(circle at 82% 6%, rgba(224, 85, 79, 0.14), transparent 44%),
+    linear-gradient(150deg, #10233a, #0a1526 60%, #10233a);
+}
+
+.snl-stage { min-width: 0; display: grid; place-items: center; }
+
+.snl-console { min-height: 0; padding: 12px; position: relative; overflow: auto; display: flex; flex-direction: column; gap: 10px; border: 1px solid rgba(120, 160, 220, 0.35); border-radius: 15px; background: linear-gradient(160deg, rgba(17, 27, 50, 0.97), rgba(9, 14, 28, 0.98)); box-shadow: 0 20px 46px rgba(0, 0, 0, 0.45); }
+.snl-console-title { min-height: 32px; padding-bottom: 8px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid rgba(120, 160, 220, 0.3); }
+.snl-console-title span { color: #cfe4ff; font-size: 10px; font-weight: 950; letter-spacing: 0.16em; }
+.snl-console-title b { padding: 5px 8px; border: 1px solid rgba(120, 160, 220, 0.5); border-radius: 99px; color: #cfe4ff; font-size: 7px; letter-spacing: 0.12em; }
+.snl-console-title b.live { border-color: #38d9f1; background: rgba(56, 217, 241, 0.14); color: #8ceafb; }
+
+.snl-current { padding: 10px; position: relative; border: 1px solid rgba(120, 160, 220, 0.32); border-radius: 11px; background: linear-gradient(125deg, rgba(90, 169, 255, 0.14), rgba(224, 85, 79, 0.08)); }
+.snl-up-now { padding: 4px 8px; position: absolute; top: 0; right: 0; border-radius: 0 9px 0 8px; background: #38d9f1; color: #061421; font-size: 7px; font-weight: 1000; letter-spacing: 0.13em; }
+.snl-rider { padding-right: 62px; display: flex; align-items: center; gap: 9px; }
+.snl-rider img { width: 45px; height: 45px; border: 3px solid #dbe9ff; border-radius: 50%; object-fit: cover; background: #1a2438; }
+.snl-rider > div { min-width: 0; display: flex; flex-direction: column; }
+.snl-rider small { color: #7f95bb; font-size: 7px; font-weight: 900; letter-spacing: 0.12em; }
+.snl-rider strong { font-size: 26px; line-height: 1; }
+.snl-aim { margin-top: 9px; display: grid; grid-template-columns: 74px 1fr; align-items: center; gap: 9px; }
+.snl-aim > div { width: 68px; height: 68px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 3px solid #2a4a72; border-radius: 14px; background: radial-gradient(circle, #eaf3ff, #9fc4f4); color: #0d2038; box-shadow: 0 6px 16px rgba(0, 0, 0, 0.35); }
+.snl-aim small { font-size: 7px; font-weight: 950; letter-spacing: 0.08em; }
+.snl-aim strong { font-size: 30px; line-height: 0.9; }
+.snl-aim p { margin: 0; color: #cbd8ef; font-size: 11px; line-height: 1.4; }
+.snl-aim p b { color: #8ceafb; }
+.snl-objective { margin-top: 8px; padding: 7px 9px; border-left: 3px solid #e0554f; background: rgba(224, 85, 79, 0.1); color: #ffd7c8; font-size: 9px; line-height: 1.4; }
+
+.snl-field, .snl-visit { padding: 9px; border: 1px solid rgba(120, 160, 220, 0.22); border-radius: 10px; background: rgba(10, 16, 30, 0.4); }
+.snl-section-head { margin-bottom: 7px; display: flex; align-items: center; justify-content: space-between; }
+.snl-section-head span { color: #cfe4ff; font-size: 8px; font-weight: 950; letter-spacing: 0.14em; }
+.snl-section-head small { color: #7f95bb; font-size: 6px; font-weight: 900; letter-spacing: 0.1em; }
+.snl-target-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+.snl-target-grid article { min-width: 0; min-height: 40px; padding: 4px 5px; display: grid; grid-template-columns: 27px minmax(0, 1fr) 30px; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--player-accent) 36%, transparent); border-left: 3px solid var(--player-accent); border-radius: 6px; background: rgba(255, 255, 255, 0.04); }
+.snl-target-grid article.current { background: color-mix(in srgb, var(--player-accent) 18%, rgba(12, 20, 38, 0.94)); box-shadow: inset 0 0 0 1px var(--player-accent); }
+.snl-target-grid article.winner { border-color: #ffd54a; background: rgba(255, 213, 74, 0.16); }
+.snl-target-grid img { width: 27px; height: 27px; border: 1px solid #fff; border-radius: 50%; object-fit: cover; }
+.snl-target-grid article > div { min-width: 0; display: flex; flex-direction: column; }
+.snl-target-grid strong { overflow: hidden; font-size: 8px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
+.snl-target-grid small { color: #8fa3c4; font-size: 7px; }
+.snl-target-grid article > b { width: 30px; height: 27px; display: grid; place-items: center; border: 2px solid var(--player-accent); border-radius: 7px; background: #eaf3ff; color: #10233a; font-size: 13px; }
+
+.snl-darts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 5px; }
+.snl-darts > div { min-width: 0; min-height: 48px; display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px dashed rgba(120, 160, 220, 0.3); border-radius: 7px; color: #6f85a8; }
+.snl-darts > div.scored { border-style: solid; border-color: #38d9f1; background: rgba(56, 217, 241, 0.1); color: #cfe4ff; }
+.snl-darts strong { font-size: 14px; }
+.snl-darts span { color: #7f95bb; font-size: 7px; font-weight: 900; letter-spacing: 0.04em; }
+
+.snl-message { min-height: 38px; padding: 8px 10px; display: grid; place-items: center; border: 1px solid rgba(90, 169, 255, 0.3); border-radius: 8px; background: linear-gradient(90deg, rgba(21, 58, 110, 0.35), rgba(56, 217, 241, 0.1)); color: #dcecff; font-size: 10px; font-weight: 800; line-height: 1.35; text-align: center; }
+.snl-actions { margin-top: auto; }
+.snl-actions.action-grid .abtn { min-height: 35px; font-size: 9px; }
+.snl-actions.action-grid .abtn.takeout { min-height: 40px; }
+.snl-actions .round-menu { min-height: 28px; border-color: rgba(90, 169, 255, 0.4); background: rgba(30, 64, 120, 0.3); color: #bcd6ff; font-size: 9px; }
+
 /* ------------------------------------------------ X01 */
 .x01-current { padding: 40px 16px 18px; display: flex; flex-direction: column; align-items: center; }
 .x01-score-block { width: 100%; padding: 12px 8px 14px; display: flex; flex-direction: column; align-items: center; border: 1px solid rgba(183, 255, 51, 0.36); background: linear-gradient(130deg, rgba(166, 245, 49, 0.96), rgba(83, 196, 33, 0.94)); color: #0d1608; box-shadow: 0 10px 30px rgba(114, 232, 43, 0.2); }
@@ -1134,10 +1643,6 @@ body.fullscreen-game .page { max-width: none; height: 100vh; padding: 8px 14px; 
 .x01-player-row small { color: var(--player-accent); font-size: 9px; font-weight: 950; letter-spacing: 0.09em; }
 .x01-player-row strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; text-transform: uppercase; white-space: nowrap; }
 .x01-player-row > b { color: white; font-size: 26px; }
-
-.derby-track { position: relative; height: 18px; margin-top: 3px; }
-.derby-line { position: absolute; inset: auto 0 0; border-bottom: 2px dashed rgba(255, 255, 255, 0.25); }
-.derby-donkey { position: absolute; bottom: 0; font-size: 15px; transform: translateX(-50%); transition: left 0.4s ease; }
 
 /* ------------------------------------------------ shared panels */
 .side-panel { min-height: 0; padding: 39px 9px 10px; display: flex; flex-direction: column; }
@@ -1526,12 +2031,18 @@ body.presentation-mode .arena-page { height: 100%; display: flex; flex-direction
 body.presentation-mode .arena-titlebar { margin-bottom: 8px; }
 body.presentation-mode .game-panel { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; }
 body.presentation-mode .arena-layout { height: 100%; min-height: 0; flex: 1 1 auto; }
+body.presentation-mode .derby-live-layout,
+body.presentation-mode .chore-live-layout,
+body.presentation-mode .snl-live-layout { height: 100%; min-height: 0; flex: 1 1 auto; }
 
 body.fullscreen-game .arena-page { height: 100%; display: flex; flex-direction: column; }
 body.fullscreen-game .arena-titlebar { min-height: 48px; margin-bottom: 8px; flex: 0 0 auto; }
 body.fullscreen-game .arena-title h1 { font-size: 21px; }
 body.fullscreen-game .game-panel { min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; overflow: hidden; }
 body.fullscreen-game .arena-layout { height: 100%; min-height: 0; flex: 1 1 auto; }
+body.fullscreen-game .derby-live-layout,
+body.fullscreen-game .chore-live-layout,
+body.fullscreen-game .snl-live-layout { height: 100%; min-height: 0; flex: 1 1 auto; }
 body.fullscreen-game .stage-board { width: min(90%, calc(100vh - 205px), 820px); }
 body.fullscreen-game .space-playfield .space-orbit-stage { width: min(100%, 78vh, 800px); }
 
@@ -1542,11 +2053,16 @@ body.fullscreen-game .space-playfield .space-orbit-stage { width: min(100%, 78vh
   .x01-logo strong { font-size: 52px; }
   .space-logo strong { font-size: 36px; }
   .space-logo b { font-size: 30px; }
+  .derby-live-layout { grid-template-columns: minmax(520px, 1fr) 270px; }
+  .chore-live-layout { grid-template-columns: minmax(520px, 1fr) 250px; }
+  .snl-live-layout { grid-template-columns: minmax(460px, 1fr) 280px; }
 }
 
 @media (max-width: 1100px) {
   .arena-layout, .space-layout { grid-template-columns: 1fr 1fr; }
   .x01-stage, .killer-target, .space-playfield { grid-column: 1 / -1; order: -1; min-height: 420px; }
   .arena-rules { grid-column: 1 / -1; }
+  .derby-live-layout, .chore-live-layout, .snl-live-layout { grid-template-columns: 1fr; }
+  .derby-console, .chore-console, .snl-console { overflow: visible; }
 }
 </style>
