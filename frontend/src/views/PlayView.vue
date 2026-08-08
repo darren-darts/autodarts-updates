@@ -145,14 +145,16 @@ const title = computed(() => {
 // localisation); this chip reflects its health from /api/detection/autodarts.
 // The four states map to the one thing the player needs to know - will a
 // thrown dart score right now, and if not, what to fix.
+// `ready` is the one bit that matters mid-throw: is it safe to throw right now?
+// `big` is the huge word shown in the centre-board overlay whenever it is NOT.
 const scan = computed(() => {
   const d = detection.value
-  if (!d) return { label: 'CONNECTING…', detail: 'Contacting the Autodarts detector', tone: 'working' }
-  if (!d.available) return { label: 'AUTODARTS OFFLINE', detail: 'Detection service unreachable — start Autodarts, then check the Board Manager', tone: 'bad' }
-  if (!d.connected) return { label: 'CAMERAS OFFLINE', detail: 'Autodarts is up but its cameras aren’t connected — open the Board Manager (:3180)', tone: 'bad' }
-  if (!d.running) return { label: 'BOARD IDLE', detail: 'Start a game in Autodarts (lobby) so it begins detecting throws', tone: 'warn' }
-  if (d.stuck) return { label: 'BOARD STUCK — RESETTING', detail: 'Autodarts is wedged in a takeout; auto-resetting to recover. If it keeps happening, fix the board lighting / camera exposure.', tone: 'warn' }
-  return { label: 'SCANNING', detail: 'Autodarts live · darts score automatically', tone: 'good' }
+  if (!d) return { label: 'CONNECTING…', big: 'CONNECTING', detail: 'Contacting the Autodarts detector', tone: 'working', ready: false }
+  if (!d.available) return { label: 'AUTODARTS OFFLINE', big: 'OFFLINE', detail: 'Detection service unreachable — start Autodarts, then check the Board Manager (:3180)', tone: 'bad', ready: false }
+  if (!d.connected) return { label: 'CAMERAS OFFLINE', big: 'NO CAMERAS', detail: 'Autodarts is up but its cameras aren’t connected — open the Board Manager (:3180)', tone: 'bad', ready: false }
+  if (!d.running) return { label: 'BOARD NOT STARTED', big: 'START A GAME', detail: 'Start a game in Autodarts (lobby) so it begins detecting throws', tone: 'warn', ready: false }
+  if (d.stuck) return { label: 'PLEASE WAIT', big: 'WAIT', detail: 'Board stuck — auto-resetting to recover. Don’t throw until it clears.', tone: 'busy', ready: false }
+  return { label: 'READY TO THROW', big: 'READY', detail: 'Autodarts is live — throw whenever you’re ready', tone: 'ready', ready: true }
 })
 
 // ---------------------------------------------------------------- killer helpers
@@ -1318,6 +1320,19 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
+    <!-- Big, unmissable board-detection state: only while a game is live and
+         it is NOT safe to throw. Ready needs no overlay (the green chip says
+         so); everything else gets a huge centred word - WAIT while auto-
+         resetting, or what to fix. pointer-events:none so the manual controls
+         underneath stay usable for entering darts by hand. -->
+    <div v-if="state.active && !scan.ready" class="detect-overlay" :class="scan.tone">
+      <div class="detect-overlay-card">
+        <span class="detect-overlay-eyebrow">DART DETECTION</span>
+        <strong class="detect-overlay-word">{{ scan.big }}</strong>
+        <small class="detect-overlay-detail">{{ scan.detail }}</small>
+      </div>
+    </div>
+
     <!-- help dialog -->
     <div v-if="helpOpen" class="dialog-backdrop" @click.self="helpOpen = false">
       <div class="dialog">
@@ -1416,7 +1431,31 @@ body.fullscreen-game .page { max-width: none; height: 100vh; padding: 8px 14px; 
 .scan-status.bad { border-color: rgba(255, 95, 105, 0.38); }
 .scan-status.bad i { background: var(--arena-red); box-shadow: 0 0 13px var(--arena-red); animation: none; }
 .scan-status.bad strong { color: var(--arena-red); }
+/* Ready: the one state a player wants to be certain of - a bold green pill. */
+.scan-status.ready { border-color: var(--arena-green); background: linear-gradient(120deg, rgba(56, 178, 110, 0.28), rgba(11, 19, 24, 0.82)); box-shadow: 0 0 22px -6px var(--arena-green); }
+.scan-status.ready strong { color: #b6ffcf; font-size: 16px; letter-spacing: 0.14em; }
+.scan-status.ready i { width: 14px; height: 14px; box-shadow: 0 0 20px var(--arena-green); }
+.scan-status.busy { border-color: rgba(255, 191, 77, 0.55); background: rgba(40, 28, 8, 0.85); }
+.scan-status.busy i { background: var(--arena-amber); box-shadow: 0 0 14px var(--arena-amber); }
+.scan-status.busy strong { color: var(--arena-amber); font-size: 15px; }
 @keyframes scan-pulse { 50% { opacity: 0.46; transform: scale(0.72); } }
+
+/* Board-detection overlay: a huge word over the centre of the board whenever it
+   is not safe to throw. Non-interactive so the controls beneath stay usable. */
+.detect-overlay { position: fixed; inset: 0; z-index: 160; display: grid; place-items: center; pointer-events: none; }
+.detect-overlay-card { padding: 26px 46px; display: flex; flex-direction: column; align-items: center; gap: 6px; border: 2px solid rgba(255, 255, 255, 0.22); border-radius: 22px; background: rgba(6, 11, 20, 0.82); backdrop-filter: blur(3px); box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6); text-align: center; animation: detect-pop 0.25s cubic-bezier(0.34, 1.56, 0.5, 1); }
+.detect-overlay-eyebrow { color: #8ea3c4; font-size: 12px; font-weight: 900; letter-spacing: 0.28em; }
+.detect-overlay-word { font-size: clamp(56px, 12vw, 132px); font-weight: 950; line-height: 0.95; letter-spacing: 0.02em; }
+.detect-overlay-detail { max-width: 30ch; margin-top: 4px; color: #cdd8ec; font-size: clamp(12px, 1.6vw, 16px); font-weight: 700; line-height: 1.35; }
+.detect-overlay.busy .detect-overlay-card { border-color: rgba(255, 191, 77, 0.6); }
+.detect-overlay.busy .detect-overlay-word { color: #ffcf6a; animation: detect-throb 1s ease-in-out infinite; }
+.detect-overlay.working .detect-overlay-card { border-color: rgba(56, 217, 241, 0.55); }
+.detect-overlay.working .detect-overlay-word { color: #8ceafb; animation: detect-throb 1.2s ease-in-out infinite; }
+.detect-overlay.warn .detect-overlay-word { color: #ffcf6a; }
+.detect-overlay.bad .detect-overlay-card { border-color: rgba(255, 95, 105, 0.55); }
+.detect-overlay.bad .detect-overlay-word { color: #ff7a83; }
+@keyframes detect-pop { from { transform: scale(0.7); opacity: 0; } }
+@keyframes detect-throb { 50% { opacity: 0.5; } }
 
 .game-panel { border: 1px solid rgba(118, 144, 183, 0.27); border-radius: 18px; overflow: hidden; background: #080b11; box-shadow: 0 36px 110px rgba(0, 0, 0, 0.48); }
 
