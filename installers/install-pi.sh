@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Install or update ShepDarts on a Raspberry Pi (or any Debian-ish Linux).
+# Install or update Autodarts on a Raspberry Pi (or any Debian-ish Linux).
 #
 #   curl -fsSL https://YOUR-BUCKET/updates/installers/install-pi.sh | bash
 #
@@ -33,7 +33,7 @@ die()  { printf '\n\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 BASE_URL="${BASE_URL%/}"
 
-say "Installing ShepDarts to $TARGET"
+say "Installing Autodarts to $TARGET"
 
 # ---------------------------------------------------------------- packages
 # libgl1 and libglib2.0-0 are OpenCV's runtime shared libraries. Without
@@ -54,7 +54,7 @@ fi
 
 # ------------------------------------------------------------------ layout
 mkdir -p "$TARGET"/{config,staging,logs}
-echo "This file marks an installed ShepDarts tree. Do not delete it." > "$TARGET/.autodarts-root"
+echo "This file marks an installed Autodarts tree. Do not delete it." > "$TARGET/.autodarts-root"
 
 # ------------------------------------------------------- fetch the payload
 # The installer pulls the current release through the *same* signed manifest
@@ -116,19 +116,12 @@ if [ ! -x "$TARGET/runtime/bin/python3" ]; then
 fi
 "$TARGET/runtime/bin/pip" install --upgrade pip --quiet
 "$TARGET/runtime/bin/pip" install -r "$TARGET/app/backend/requirements.txt" --quiet
-
-# The hash is what launcher.py's sync_runtime_dependencies compares against on
-# every future update - writing the real one now (matching what was just
-# installed above) means the very next update does not redundantly reinstall
-# everything just because this file said nothing about what was already done.
 python3 - "$TARGET" <<'PYTHON'
-import hashlib, json, sys
+import json, sys
 from pathlib import Path
 root = Path(sys.argv[1])
-requirements = root / "app" / "backend" / "requirements.txt"
-digest = hashlib.sha256(requirements.read_bytes()).hexdigest() if requirements.is_file() else ""
 (root / "runtime" / "RUNTIME.json").write_text(
-    json.dumps({"version": "1.0.0", "platform": "posix", "requirements_sha256": digest}, indent=2)
+    json.dumps({"version": "1.0.0", "platform": "posix"}, indent=2)
 )
 PYTHON
 
@@ -141,7 +134,7 @@ say "Installing the autostart service"
 mkdir -p "$HOME/.config/systemd/user"
 cat > "$HOME/.config/systemd/user/autodarts.service" <<UNIT
 [Unit]
-Description=ShepDarts
+Description=Autodarts
 After=network-online.target
 
 [Service]
@@ -162,7 +155,7 @@ systemctl --user enable autodarts.service >/dev/null 2>&1 || true
 # headless Pi next to a dartboard means it never runs at all.
 loginctl enable-linger "$USER" >/dev/null 2>&1 || true
 
-say "Installed ShepDarts $VERSION"
+say "Installed Autodarts $VERSION"
 info "start:   systemctl --user restart autodarts"
 info "logs:    journalctl --user -u autodarts -f"
 info "open:    http://$(hostname -I | awk '{print $1}'):8000"
