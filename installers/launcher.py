@@ -1,4 +1,4 @@
-"""Autodarts launcher: apply any staged update, then run the app.
+"""ShepDarts launcher: apply any staged update, then run the app.
 
 Installed at the root of the install tree, *outside* `app/`. That placement
 is the whole point rather than an accident:
@@ -413,7 +413,7 @@ def main() -> int:
                 shutil.rmtree(APP, ignore_errors=True)
                 PREVIOUS.rename(APP)
             else:
-                log("app/ is missing and cannot be recovered. Please reinstall Autodarts.")
+                log("app/ is missing and cannot be recovered. Please reinstall ShepDarts.")
                 return 1
 
         started = time.time()

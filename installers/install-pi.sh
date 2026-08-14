@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 #
-# Install or update Autodarts on a Raspberry Pi (or any Debian-ish Linux).
+# Install or update ShepDarts on a Raspberry Pi (or any Debian-ish Linux).
 #
 #   curl -fsSL https://YOUR-BUCKET/updates/installers/install-pi.sh | bash
 #
 # Produces the same layout the Windows installer does, so the in-app updater
 # works identically on both:
 #
-#   ~/autodarts/
+#   ~/shepdarts/
 #     .autodarts-root    launcher.py    runtime/  (venv)
 #     app/               config/        staging/  logs/
+#
+# ShepDarts is this project; Autodarts is the separate camera/detection
+# software it talks to. Everything the user sees - the directory, the service,
+# the messages - says ShepDarts. The AUTODARTS_* environment variables and the
+# .autodarts-root marker keep their names on purpose: they are the contract
+# with backend/paths.py, launcher.py and tools/release.py, and renaming them
+# would strand every install that already exists.
 #
 # Unlike Windows, the interpreter is not shipped - the Pi's own python3 is
 # used to build a venv here. Cross-compiling OpenCV and numpy for ARM to
@@ -22,7 +29,10 @@ set -euo pipefail
 
 BASE_URL="${AUTODARTS_BASE_URL:-}"
 CHANNEL="${AUTODARTS_CHANNEL:-stable}"
-TARGET="${AUTODARTS_HOME:-$HOME/autodarts}"
+TARGET="${AUTODARTS_HOME:-$HOME/shepdarts}"
+SERVICE="shepdarts"
+LEGACY_TARGET="$HOME/autodarts"
+LEGACY_SERVICE="autodarts"
 
 say()  { printf '\n\033[1m%s\033[0m\n' "$*"; }
 info() { printf '  %s\n' "$*"; }
@@ -33,7 +43,27 @@ die()  { printf '\n\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 BASE_URL="${BASE_URL%/}"
 
-say "Installing Autodarts to $TARGET"
+# ------------------------------------------------------------- the rename
+# Installs made before the rename live in ~/autodarts and run as a user service
+# called autodarts. Both move here, in this order: stop the old service first so
+# nothing is writing into the tree while it is moved, and remove its unit
+# afterwards so the Pi is never left with two units racing for port 8000.
+#
+# Only the *user* unit is touched. The Autodarts Board Manager is a separate
+# program installed as a SYSTEM service, often with the same name - `systemctl
+# --user` cannot see it, let alone stop it, and that is exactly the point.
+if [ -z "${AUTODARTS_HOME:-}" ] && [ ! -e "$TARGET" ] && [ -f "$LEGACY_TARGET/.autodarts-root" ]; then
+  say "Moving the existing install from $LEGACY_TARGET"
+  systemctl --user stop "$LEGACY_SERVICE.service" >/dev/null 2>&1 || true
+  if mv "$LEGACY_TARGET" "$TARGET"; then
+    info "moved - your players and settings came with it"
+  else
+    info "could not move it - installing into $LEGACY_TARGET instead"
+    TARGET="$LEGACY_TARGET"
+  fi
+fi
+
+say "Installing ShepDarts to $TARGET"
 
 # ---------------------------------------------------------------- packages
 # libgl1 and libglib2.0-0 are OpenCV's runtime shared libraries. Without
@@ -54,7 +84,7 @@ fi
 
 # ------------------------------------------------------------------ layout
 mkdir -p "$TARGET"/{config,staging,logs}
-echo "This file marks an installed Autodarts tree. Do not delete it." > "$TARGET/.autodarts-root"
+echo "This file marks an installed ShepDarts tree. Do not delete it." > "$TARGET/.autodarts-root"
 
 # ------------------------------------------------------- fetch the payload
 # The installer pulls the current release through the *same* signed manifest
@@ -132,9 +162,9 @@ curl -fsSL "$BASE_URL/installers/launcher.py" -o "$TARGET/launcher.py" 2>/dev/nu
 # ------------------------------------------------------------ systemd unit
 say "Installing the autostart service"
 mkdir -p "$HOME/.config/systemd/user"
-cat > "$HOME/.config/systemd/user/autodarts.service" <<UNIT
+cat > "$HOME/.config/systemd/user/$SERVICE.service" <<UNIT
 [Unit]
-Description=Autodarts
+Description=ShepDarts
 After=network-online.target
 
 [Service]
@@ -149,15 +179,29 @@ RestartSec=5
 WantedBy=default.target
 UNIT
 
+# Retire the pre-rename unit before enabling the new one, so only one of them
+# can ever start. Its file has to go too: a disabled unit still starts if
+# anything pulls it in, and it points at a directory that has now moved.
+if [ -f "$HOME/.config/systemd/user/$LEGACY_SERVICE.service" ]; then
+  info "removing the old $LEGACY_SERVICE user service"
+  systemctl --user disable --now "$LEGACY_SERVICE.service" >/dev/null 2>&1 || true
+  rm -f "$HOME/.config/systemd/user/$LEGACY_SERVICE.service"
+fi
+
 systemctl --user daemon-reload
-systemctl --user enable autodarts.service >/dev/null 2>&1 || true
+systemctl --user enable "$SERVICE.service" >/dev/null 2>&1 || true
 # Without lingering the service stops when the user logs out, which for a
 # headless Pi next to a dartboard means it never runs at all.
 loginctl enable-linger "$USER" >/dev/null 2>&1 || true
 
-say "Installed Autodarts $VERSION"
-info "start:   systemctl --user restart autodarts"
-info "logs:    journalctl --user -u autodarts -f"
+# Started here, not just enabled. A re-run over an older install has stopped
+# whatever was running; leaving the Pi with nothing serving :8000 until the
+# next reboot would look exactly like a failed install.
+systemctl --user restart "$SERVICE.service" || true
+
+say "Installed ShepDarts $VERSION"
+info "start:   systemctl --user restart $SERVICE"
+info "logs:    journalctl --user -u $SERVICE -f"
 info "open:    http://$(hostname -I | awk '{print $1}'):8000"
 info ""
 info "Updates from here on are done in the app itself, on the Updates page."

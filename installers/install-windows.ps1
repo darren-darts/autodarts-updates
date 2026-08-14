@@ -1,5 +1,5 @@
 #
-# Install or update Autodarts on Windows.
+# Install or update ShepDarts on Windows.
 #
 #   $env:AUTODARTS_BASE_URL = 'https://YOUR-PAGES/updates'
 #   irm https://YOUR-PAGES/updates/installers/install-windows.ps1 | iex
@@ -8,9 +8,16 @@
 # Produces the identical layout on both platforms, so the in-app updater,
 # launcher.py and backend/paths.py behave the same everywhere:
 #
-#   %LOCALAPPDATA%\Autodarts\
+#   %LOCALAPPDATA%\ShepDarts\
 #     .autodarts-root    launcher.py    runtime\   (the interpreter)
 #     app\               config\        staging\   logs\
+#
+# ShepDarts is this project; Autodarts is the separate camera/detection
+# software it talks to. Anything the user sees - the folder, the shortcut, the
+# progress messages - says ShepDarts. The AUTODARTS_* environment variables and
+# the .autodarts-root marker keep their names on purpose: they are the contract
+# with backend/paths.py, launcher.py and tools/release.py, and renaming them
+# would strand every install that already exists.
 #
 # The interpreter is provisioned here rather than shipped. If this machine has
 # a usable Python, a venv is built from it exactly as the Pi does. If it does
@@ -168,12 +175,35 @@ Set AUTODARTS_BASE_URL to your update URL, e.g.
 "@
 }
 if ([string]::IsNullOrWhiteSpace($Channel)) { $Channel = 'stable' }
-if ([string]::IsNullOrWhiteSpace($Target))  { $Target = Join-Path $env:LOCALAPPDATA 'Autodarts' }
+
+$Chosen = -not [string]::IsNullOrWhiteSpace($Target)
+if (-not $Chosen) { $Target = Join-Path $env:LOCALAPPDATA 'ShepDarts' }
+
+# Installs made before the rename live in ...\Autodarts. Moving the whole tree
+# keeps config\ - players, settings, the release channel - exactly where the
+# app expects to find it relative to the marker file, so nothing is lost and
+# there is no second copy left behind to confuse anyone later.
+#
+# If the move fails the old install is almost certainly still running and
+# holding files open. Installing into the old folder is then the right answer:
+# it is a working install either way, and the rename can happen on a later run.
+$Legacy = Join-Path $env:LOCALAPPDATA 'Autodarts'
+if (-not $Chosen -and -not (Test-Path $Target) -and (Test-Path (Join-Path $Legacy '.autodarts-root'))) {
+    Say "Moving the existing install from $Legacy"
+    try {
+        Move-Item -LiteralPath $Legacy -Destination $Target
+        Info 'moved - your players and settings came with it'
+    }
+    catch {
+        Info "could not move it (is ShepDarts running?) - installing into $Legacy instead"
+        $Target = $Legacy
+    }
+}
 
 $BaseUrl = $BaseUrl.TrimEnd('/')
 $Runtime = Join-Path $Target 'runtime'
 
-Say "Installing Autodarts to $Target"
+Say "Installing ShepDarts to $Target"
 
 # ------------------------------------------------------------------- layout
 
@@ -182,7 +212,7 @@ foreach ($name in 'config', 'staging', 'logs') {
 }
 [IO.File]::WriteAllText(
     (Join-Path $Target '.autodarts-root'),
-    "This file marks an installed Autodarts tree. Do not delete it.`r`n"
+    "This file marks an installed ShepDarts tree. Do not delete it.`r`n"
 )
 
 # ------------------------------------------------------- fetch the payload
@@ -430,19 +460,40 @@ $launcher = Join-Path $Target 'launcher.py'
 $shell = New-Object -ComObject WScript.Shell
 foreach ($directory in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
     if (-not $directory) { continue }
-    $path = Join-Path $directory 'Autodarts.lnk'
+
+    # An install from before the rename left an Autodarts.lnk pointing at our
+    # launcher, and leaving it beside the new one means two shortcuts for one
+    # app - the old one broken if the folder moved.
+    #
+    # It is only removed once its target is confirmed to be ours. The Autodarts
+    # Board Manager is a different program that may well have a shortcut of the
+    # same name, and deleting that would be unforgivable.
+    $stale = Join-Path $directory 'Autodarts.lnk'
+    if (Test-Path $stale) {
+        try {
+            $existing = $shell.CreateShortcut($stale)
+            if ($existing.Arguments -like '*launcher.py*' -and
+                ($existing.Arguments -like "*$Target*" -or $existing.Arguments -like "*$Legacy*")) {
+                Remove-Item -LiteralPath $stale -Force
+                Info "removed the old $stale"
+            }
+        }
+        catch { <# unreadable shortcut: leave it alone #> }
+    }
+
+    $path = Join-Path $directory 'ShepDarts.lnk'
     $link = $shell.CreateShortcut($path)
     $link.TargetPath = $pythonw
     $link.Arguments = """$launcher"""
     $link.WorkingDirectory = $Target
-    $link.Description = 'Autodarts'
+    $link.Description = 'ShepDarts'
     if (Test-Path $icon) { $link.IconLocation = $icon }
     $link.Save()
     Info $path
 }
 
-Say "Installed Autodarts $version"
-Info 'start:   the Autodarts shortcut on your desktop'
+Say "Installed ShepDarts $version"
+Info 'start:   the ShepDarts shortcut on your desktop'
 Info "logs:    $Target\logs"
 Info 'open:    http://localhost:8000'
 Info ''
