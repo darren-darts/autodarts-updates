@@ -85,8 +85,24 @@ if [ -f "\$PREFS" ]; then
   sed -i 's/"exit_type":"[^"]*"/"exit_type":"Normal"/; s/"exited_cleanly":false/"exited_cleanly":true/' "\$PREFS" 2>/dev/null || true
 fi
 
+# --password-store=basic is what stops the "Enter password to unlock your login
+# keyring" dialog appearing over the game.
+#
+# Chromium asks gnome-keyring for a place to keep saved passwords the moment it
+# starts. Desktop Autologin means nobody typed a login password, so PAM never
+# unlocked the login keyring - and Chromium's request is what makes the keyring
+# demand one. On a kiosk with no keyboard that dialog cannot be dismissed at
+# all, and it sits on top of the app forever.
+#
+# "basic" keeps the passwords in Chromium's own profile instead of the keyring,
+# so nothing is ever asked to unlock. That is a real (if small) reduction in how
+# well saved passwords are protected at rest - which is the right trade here,
+# because this profile exists to show one page on the local network and should
+# never have a password saved in it in the first place. The system keyring is
+# left alone for every other program on the Pi.
 exec "\$CHROME" \\
   --kiosk "\$URL" \\
+  --password-store=basic \\
   --noerrdialogs --disable-infobars --disable-session-crashed-bubble \\
   --disable-features=Translate --disable-pinch --overscroll-history-navigation=0 \\
   --check-for-update-interval=31536000 \\
@@ -135,6 +151,7 @@ info "xdg:      $XDG"
 
 say "Kiosk configured"
 info "url:       $URL"
+info "keyring:   bypassed - Chromium will not ask for a keyring password"
 info "try it now: $WRAPPER    (run from the desktop, or just reboot)"
 info ""
 info "Last step, needs a keyboard once so boot needs none afterwards:"
