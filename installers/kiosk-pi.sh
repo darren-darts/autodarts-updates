@@ -100,6 +100,12 @@ fi
 # because this profile exists to show one page on the local network and should
 # never have a password saved in it in the first place. The system keyring is
 # left alone for every other program on the Pi.
+#
+# The GPU flags matter on a Pi 4: Chromium's blocklist can leave the V3D GPU
+# unused and rasterise the whole page on the CPU - the same CPU Autodarts needs
+# for dart detection. The app also switches itself into its lighter
+# "performance mode" when it sees a Pi browser (see frontend/src/perf.js);
+# add ?lite=0 to the URL above to turn that off.
 exec "\$CHROME" \\
   --kiosk "\$URL" \\
   --password-store=basic \\
@@ -107,6 +113,7 @@ exec "\$CHROME" \\
   --disable-features=Translate --disable-pinch --overscroll-history-navigation=0 \\
   --check-for-update-interval=31536000 \\
   --autoplay-policy=no-user-gesture-required \\
+  --ignore-gpu-blocklist --enable-gpu-rasterization --disable-smooth-scrolling \\
   --ozone-platform-hint=auto
 WRAP
 chmod +x "$WRAPPER"
