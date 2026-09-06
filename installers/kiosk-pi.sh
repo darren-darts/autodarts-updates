@@ -38,6 +38,10 @@ done
 NEED=()
 [ -z "$CHROME" ] && NEED+=(chromium-browser)
 command -v unclutter >/dev/null 2>&1 || NEED+=(unclutter)
+# The dart caller speaks through Chromium's speech synthesis, which on Linux
+# is speech-dispatcher driving espeak-ng. Without them the caller is silent.
+command -v spd-say >/dev/null 2>&1 || NEED+=(speech-dispatcher speech-dispatcher-espeak-ng)
+command -v espeak-ng >/dev/null 2>&1 || NEED+=(espeak-ng)
 if [ "${#NEED[@]}" -gt 0 ]; then
   info "installing: ${NEED[*]}"
   sudo apt-get update -qq
@@ -114,6 +118,7 @@ exec "\$CHROME" \\
   --check-for-update-interval=31536000 \\
   --autoplay-policy=no-user-gesture-required \\
   --ignore-gpu-blocklist --enable-gpu-rasterization --disable-smooth-scrolling \\
+  --enable-speech-dispatcher \\
   --ozone-platform-hint=auto
 WRAP
 chmod +x "$WRAPPER"
